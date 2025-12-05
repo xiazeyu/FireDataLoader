@@ -1,5 +1,8 @@
-geopandas
-landfire
-plotly
-nbformat
 earthengine-api
+geopandas
+nbformat
+numpy
+pandas
+plotly
+rasterio
+shapely
