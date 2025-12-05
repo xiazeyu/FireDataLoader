@@ -475,7 +475,7 @@ def download_building_height(task_info: TaskInfo):
 
     # TODO
 
-def download_lai(task_info: TaskInfo):
+def download_tc(task_info: TaskInfo):
     log.info(
         f"Downloading LAI data for event_id: {task_info.event_id}")
 
@@ -483,6 +483,8 @@ def download_lai(task_info: TaskInfo):
 
 
 def main() -> None:
+    
+    # TODO LANDCOVER: resample using nearest neighbor
 
     global GEE_PROJECT_ID
     global HERBIE_CACHE_DIR
@@ -545,7 +547,7 @@ def main() -> None:
         save_numpy(task_info, hrrr_data, args.output_dir)
 
     download_building_height(task_info)
-    download_lai(task_info)
+    download_tc(task_info)
 
 
 if __name__ == "__main__":

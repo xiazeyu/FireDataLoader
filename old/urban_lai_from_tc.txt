@@ -82,7 +82,7 @@ var FILENAMES = [
   'LAI_Grid_30deg_107_2020-07-02',
   'LAI_Grid_30deg_108_2020-07-02'
 ];
- 
+
 var imgs = FILENAMES.map(function(name) {
  
   var img = ee.Image(ASSET_ROOT + name);
@@ -109,3 +109,7 @@ print('LAI tile collection →', laiTilesIC);
  
  
 var laiMosaic = laiTilesIC.mosaic()
+
+https://code.earthengine.google.com/?asset=projects/tc-global-urban/assets/LAI_Grid_30deg_101_2020-07-02
+
+Nominal Scale： 10 m to 1 m in real time. need conversion.
