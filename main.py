@@ -2,10 +2,12 @@ from affine import Affine
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from herbie import Herbie
+from pyproj import Transformer
 from rasterio import features
 from rasterio.enums import Resampling
 from rasterio.transform import from_origin
 from shapely.geometry import box, MultiPolygon
+from tqdm import tqdm
 from typing import Any, Literal, Optional
 import argparse
 import ee
@@ -16,7 +18,6 @@ import math
 import numpy as np
 import os
 import pandas as pd
-from pyproj import Transformer
 import requests
 import rioxarray
 import xarray as xr
@@ -25,7 +26,7 @@ xr.set_options(use_new_combine_kwarg_defaults=True)
 
 log = logging.getLogger(__name__)
 GEE_PROJECT_ID = "annular-haven-474021-v1"
-HERBIE_CACHE_DIR = os.path.expanduser("~/.herbie_cache")
+HERBIE_CACHE_DIR = "./datasets/herbie"
 
 
 @dataclass
@@ -339,27 +340,28 @@ def clip_hrrr_to_task(hrrr_data: xr.Dataset, task_info: TaskInfo, target_resolut
     assert "x" in hrrr_data.dims and "y" in hrrr_data.dims, "HRRR data must have 'x' and 'y' dimensions"
 
     assert hrrr_data.rio.crs is not None, "HRRR data must have a valid CRS for reprojection"
-    
+
     # Retrieve the CRS from Herbie accessor
     # Herbie usually attaches the valid CRS here.
     crs = hrrr_data.herbie.crs
-    
+
     # Create a transformer from Lat/Lon (4326) to the HRRR CRS
     # Note: HRRR is Lambert Conformal Conic
     transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-    
+
     # Project the 2D Lat/Lon grids to get 2D Projected coords
     # We use the existing 2D lat/lon arrays in the dataset
-    xx, yy = transformer.transform(hrrr_data.longitude.values, hrrr_data.latitude.values)
-    
+    xx, yy = transformer.transform(
+        hrrr_data.longitude.values, hrrr_data.latitude.values)
+
     # Extract 1D axes (HRRR is a rectilinear grid in its own projection)
     # We can take the first row for x and first column for y
     x_coords = xx[0, :]
     y_coords = yy[:, 0]
-    
+
     # Assign these new coordinates to the dataset
     hrrr_data = hrrr_data.assign_coords(x=x_coords, y=y_coords)
-    
+
     # Ensure the CRS is written to the xarray object for rioxarray
     hrrr_data = hrrr_data.rio.write_crs(crs)
 
@@ -394,34 +396,61 @@ def download_hrrr(task_info: TaskInfo, delta_hour: int = 1) -> list[DataWithMeta
         'u10': [],  # Wind U
         'v10': [],  # Wind V
     }
-    timestamps = []
 
+    # Pre-calculate the list of timestamps to iterate over
+    timestamps_iter = []
     current_time = task_info.t_start
-    end_time = task_info.t_end
+    while current_time <= task_info.t_end:
+        timestamps_iter.append(current_time)
+        current_time += timedelta(hours=delta_hour)
 
-    while current_time <= end_time:
+    if not timestamps_iter:
+        raise ValueError("No time range defined.")
+
+    timestamps: list[datetime] = []
+
+    pbar = tqdm(timestamps_iter)
+    for current_time in pbar:
         log.info(f"Processing HRRR data for timestamp: {current_time}")
 
-        H = Herbie(
-            current_time,
-            model='hrrr',
-            product='sfc',
-            fxx=0,
-            save_dir=HERBIE_CACHE_DIR,
-            verbose=log.level >= logging.INFO,
-        )
+        try:
+            pbar.set_description(
+                f"Processing HRRR on {current_time.strftime('%Y-%m-%d %H:%M')}")
+            H = Herbie(
+                current_time,
+                model='hrrr',
+                product='sfc',
+                fxx=0,
+                save_dir=HERBIE_CACHE_DIR,
+                verbose=log.level >= logging.INFO,
+            )
 
-        ds_rh, ds_wind = H.xarray(
-            ":(RH:2 m|(?:UGRD|VGRD):10 m)", remove_grib=False)
+            try:
+                ds_rh = H.xarray(":RH:2 m", remove_grib=False)
+                ds_wind = H.xarray(":(?:UGRD|VGRD):10 m", remove_grib=False)
+            except ValueError as e:
+                if "No index file" in str(e):
+                    tqdm.write(
+                        f"⚠️ Index missing for {current_time}. Attempting full download...")
+                    H.download()
+                    ds_rh = H.xarray(":RH:2 m", remove_grib=False)
+                    ds_wind = H.xarray(
+                        ":(?:UGRD|VGRD):10 m", remove_grib=False)
+                else:
+                    raise e
 
-        ds_rh = clip_hrrr_to_task(ds_rh, task_info)
-        data_buffer['r2'].append(ds_rh.r2.values)
+            ds_rh = clip_hrrr_to_task(ds_rh, task_info)
+            data_buffer['r2'].append(ds_rh.r2.values)
 
-        ds_wind = clip_hrrr_to_task(ds_wind, task_info)
-        data_buffer['u10'].append(ds_wind.u10.values)
-        data_buffer['v10'].append(ds_wind.v10.values)
-        timestamps.append(current_time)
-        current_time += timedelta(hours=delta_hour)
+            ds_wind = clip_hrrr_to_task(ds_wind, task_info)
+            data_buffer['u10'].append(ds_wind.u10.values)
+            data_buffer['v10'].append(ds_wind.v10.values)
+            timestamps.append(current_time)
+        except Exception as e:
+            # CATCH-ALL: If data is missing from ALL sources
+            log.error(
+                f"❌ DATA GAP: Could not retrieve {current_time} on HRRR via Herbie. Skipping. Error: {e}")
+            continue
 
     if not timestamps:
         raise ValueError("No HRRR data downloaded.")
@@ -443,6 +472,12 @@ def download_hrrr(task_info: TaskInfo, delta_hour: int = 1) -> list[DataWithMeta
 def download_building_height(task_info: TaskInfo):
     log.info(
         f"Downloading building height data for event_id: {task_info.event_id}")
+
+    # TODO
+
+def download_lai(task_info: TaskInfo):
+    log.info(
+        f"Downloading LAI data for event_id: {task_info.event_id}")
 
     # TODO
 
@@ -510,6 +545,7 @@ def main() -> None:
         save_numpy(task_info, hrrr_data, args.output_dir)
 
     download_building_height(task_info)
+    download_lai(task_info)
 
 
 if __name__ == "__main__":
