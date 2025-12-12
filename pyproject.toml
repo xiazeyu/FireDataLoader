@@ -1,0 +1,19 @@
+[project]
+name = "firedataloader"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "affine>=2.4.0",
+    "earthengine-api>=1.7.4",
+    "geedim>=2.0.0",
+    "geemap>=0.36.6",
+    "geopandas>=1.1.1",
+    "herbie-data[extras]>=2025.12.0",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "requests>=2.32.5",
+    "rioxarray>=0.20.0",
+    "tqdm>=4.67.1",
+    "xarray>=2025.12.0",
+]
