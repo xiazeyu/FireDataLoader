@@ -2,7 +2,6 @@ from affine import Affine
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from herbie import Herbie
-from matplotlib import image
 from pyproj import Transformer
 from rasterio import features
 from rasterio.enums import Resampling
@@ -14,13 +13,11 @@ import argparse
 import ee
 import geemap
 import geopandas as gpd
-import io
 import logging
 import math
 import numpy as np
 import os
 import pandas as pd
-import requests
 import rioxarray
 import xarray as xr
 
@@ -67,6 +64,7 @@ class DataWithMetadata:
     source: Optional[str] = None
     resolution: Optional[int] = None
     unit: Optional[str] = None
+    note: Optional[Any] = None
 
 
 def get_fire_info(event_id: str, firelist_path: str = 'datasets/FEDS25MTBS/fireslist2012-2023.csv') -> FireInfo:
@@ -230,6 +228,7 @@ def process_feds25mtbs(task_info: TaskInfo, base_dir: str = 'datasets/FEDS25MTBS
         resolution=375,
     )
 
+
 def _ensure_ee_initialized() -> None:
     try:
         # Check if initialized by trying a simple operation
@@ -242,16 +241,17 @@ def _ensure_ee_initialized() -> None:
             ee.Authenticate()
             ee.Initialize(project=GEE_PROJECT_ID)
 
+
 def _download_processed_image(image: ee.Image, task_info: TaskInfo, band_name: str) -> np.ndarray:
     _ensure_ee_initialized()
 
     roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
-    
+
     log.info(f"Downloading band '{band_name}' via geemap...")
-    
+
     try:
         image = image.select(band_name).reproject(
-            crs=task_info.crs, 
+            crs=task_info.crs,
             scale=task_info.resolution
         )
         data = geemap.ee_to_numpy(
@@ -261,10 +261,10 @@ def _download_processed_image(image: ee.Image, task_info: TaskInfo, band_name: s
     except Exception as e:
         log.error(f"Error downloading with geemap: {e}")
         raise e
-    
+
     if data is None:
         raise ValueError("Download failed: geemap returned None.")
-    
+
     # geemap.ee_to_numpy typically returns shape (Height, Width, Bands).
     # If the result is 3D with a single band channel, squeeze it to 2D (Height, Width)
     # to match the behavior of the original NPY extraction.
@@ -276,59 +276,23 @@ def _download_processed_image(image: ee.Image, task_info: TaskInfo, band_name: s
     assert data.shape == task_info.shape, \
         f"Error: Downloaded data shape {data.shape} does not match expected shape {task_info.shape}"
 
-    # try:
-    #     # getDownloadURL automatically handles reprojection to task_info.crs
-    #     url = image.getDownloadURL({
-    #         'scale': task_info.resolution,
-    #         'crs': task_info.crs,
-    #         'region': roi,
-    #         'format': 'NPY'
-    #     })
-    # except Exception as e:
-    #     log.error(f"Error generating download URL: {e}")
-    #     raise e
-
-    # log.info(f"Download URL: {url}")
-    # response = requests.get(url)
-    
-    # if response.status_code != 200:
-    #     log.error(f"Error downloading data: HTTP {response.status_code}")
-    #     log.error(f"Response content: {response.content}")
-    #     response.raise_for_status()
-
-    # # Parse NPY
-    # data_dict = np.load(io.BytesIO(response.content), allow_pickle=True)
-    
-    # # GEE NPY export usually results in a structured array or dict. 
-    # # If the band name matches, extract it.
-    # if isinstance(data_dict, dict) and band_name in data_dict:
-    #     data = data_dict[band_name]
-    # elif isinstance(data_dict, np.ndarray):
-    #      # If it's a structured array, we might need to index by field name
-    #      if band_name in data_dict.dtype.names:
-    #          data = data_dict[band_name]
-    #      else:
-    #          # Fallback: assume it's the only array returned
-    #          data = data_dict
-    # else:
-    #     data = data_dict
-
-    # log.info(f"Downloaded data shape: {data.shape}")
-    
-    # assert data.shape == task_info.shape, f"Error: Downloaded data shape {data.shape} does not match expected shape {task_info.shape}"
-    
     return data
 
-def download_gee_task(task_info: TaskInfo, dataset_name: str, imagecollection: str, band: str, resample: Literal['nearest', 'bilinear', 'bicubic'] = 'bilinear') -> DataWithMetadata:
+
+def download_gee_task(task_info: TaskInfo, dataset_name: str, imagecollection: str | list[ee.Image], band: str, resample: Literal['nearest', 'bilinear', 'bicubic'] = 'bilinear') -> DataWithMetadata:
     # only works for image collections in GEE, not for feature collections
 
     log.info(
         f"Downloading {dataset_name} data for event_id: {task_info.event_id} from Google Earth Engine")
 
     _ensure_ee_initialized()
-    
+
     roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
     collection = ee.ImageCollection(imagecollection).filterBounds(roi)
+
+    # Handle case where imagecollection is already a list of images
+    if isinstance(imagecollection, list):
+        collection = ee.ImageCollection(imagecollection)
 
     if collection.size().getInfo() == 0:
         error_msg = (f"The requested ROI is outside the coverage of {imagecollection}. "
@@ -341,7 +305,7 @@ def download_gee_task(task_info: TaskInfo, dataset_name: str, imagecollection: s
 
     if resample != 'nearest':
         image = image.resample(resample)
-        
+
     data_array = _download_processed_image(image, task_info, band)
 
     return DataWithMetadata(
@@ -531,6 +495,7 @@ def download_hrrr(task_info: TaskInfo, delta_hour: int = 1) -> list[DataWithMeta
 
     return payload
 
+
 def _format_lat_lon_string(val: int, is_lon: bool) -> str:
     """Helper to format lat/lon integers for the filename (e.g. -120 -> w120, 35 -> n35)."""
     if is_lon:
@@ -540,6 +505,7 @@ def _format_lat_lon_string(val: int, is_lon: bool) -> str:
         prefix = 'n' if val >= 0 else 's'
         return f"{prefix}{abs(val):02d}"
 
+
 def _get_gba_tile_ids(bounds: tuple[float, float, float, float]) -> list[str]:
     """
     Calculates the Global Building Atlas 5x5 degree tile IDs needed to cover the bounds.
@@ -548,12 +514,12 @@ def _get_gba_tile_ids(bounds: tuple[float, float, float, float]) -> list[str]:
     bounds in CRS EPSG:4326
     """
     min_x, min_y, max_x, max_y = bounds
-    
+
     # The grid aligns to 5 degree increments.
     # We find the 'floor' 5-degree lines for the min bounds.
     start_x = math.floor(min_x / 5.0) * 5
     start_y = math.floor(min_y / 5.0) * 5
-    
+
     # We define the max iteration range (using ceil to ensure we cover the edge)
     # end_x = math.ceil(max_x / 5.0) * 5
     # end_y = math.ceil(max_y / 5.0) * 5
@@ -564,51 +530,56 @@ def _get_gba_tile_ids(bounds: tuple[float, float, float, float]) -> list[str]:
     # Iterate through the 5x5 grid cells that overlap the bounds
     # Python range is exclusive at the end, so we add 5 to end_x/end_y if we rely on range
     # But simpler is to loop with while/integers
-    
+
     curr_x = start_x
     while curr_x < max_x:  # Iterate West to East
         curr_y = start_y
         while curr_y < max_y:  # Iterate South to North
-            
+
             # Tile definitions for this 5x5 cell
-            # The naming convention puts the West and North coordinate first usually, 
+            # The naming convention puts the West and North coordinate first usually,
             # let's replicate the example: w120_n35_w115_n30
             # That example tile covers: Lon [-120, -115], Lat [30, 35]
-            
+
             # The integers used in the filename are:
             # 1. West Edge (curr_x)
             # 2. North Edge (curr_y + 5)
             # 3. East Edge (curr_x + 5)
             # 4. South Edge (curr_y)
-            
+
             tile_w = int(curr_x)
             tile_s = int(curr_y)
             tile_e = int(curr_x + 5)
             tile_n = int(curr_y + 5)
-            
+
             part1 = _format_lat_lon_string(tile_w, is_lon=True)
             part2 = _format_lat_lon_string(tile_n, is_lon=False)
             part3 = _format_lat_lon_string(tile_e, is_lon=True)
             part4 = _format_lat_lon_string(tile_s, is_lon=False)
-            
+
             tile_id = f"{part1}_{part2}_{part3}_{part4}"
             tile_paths.append(f"{base_path}/{tile_id}")
-            
+
             curr_y += 5
         curr_x += 5
-        
+
     return tile_paths
+
 
 def download_building_height(task_info: TaskInfo):
     dataset_name = "building_height"
-    log.info(f"Downloading {dataset_name} data for event_id: {task_info.event_id}")
+    log.info(
+        f"Downloading {dataset_name} data for event_id: {task_info.event_id}")
     _ensure_ee_initialized()
 
     roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
-    
-    transformer = Transformer.from_crs(task_info.crs, "EPSG:4326", always_xy=True)
-    minx, miny = transformer.transform(task_info.bounds[0], task_info.bounds[1])
-    maxx, maxy = transformer.transform(task_info.bounds[2], task_info.bounds[3])
+
+    transformer = Transformer.from_crs(
+        task_info.crs, "EPSG:4326", always_xy=True)
+    minx, miny = transformer.transform(
+        task_info.bounds[0], task_info.bounds[1])
+    maxx, maxy = transformer.transform(
+        task_info.bounds[2], task_info.bounds[3])
     latlon_bounds = (minx, miny, maxx, maxy)
 
     # Determine which tiles we need
@@ -617,7 +588,7 @@ def download_building_height(task_info: TaskInfo):
 
     # Load and Merge Collections
     collection = None
-    
+
     for path in tile_paths:
         try:
             col = ee.FeatureCollection(path)
@@ -628,14 +599,23 @@ def download_building_height(task_info: TaskInfo):
             else:
                 collection = collection.merge(col)
         except Exception as e:
-            log.warning(f"Could not load GBA tile: {path}. It might not exist or there is an access issue. Error: {e}")
+            log.warning(
+                f"Could not load GBA tile: {path}. It might not exist or there is an access issue. Error: {e}")
 
     if collection is None:
-        raise ValueError("Could not load any building atlas tiles for the requested region.")
+        raise ValueError(
+            "Could not load any building atlas tiles for the requested region.")
 
     # Filter and Clip
     # Filter bounds first to reduce processing load before intersection
     clipped = collection.filterBounds(roi)
+
+    clipped = clipped.filter(
+        ee.Filter.And(
+            ee.Filter.neq('height', None),
+            ee.Filter.gt('height', 3.971)
+        )
+    )
 
     count = clipped.size().getInfo()
     log.info(f"Buildings in region: {count}")
@@ -644,28 +624,113 @@ def download_building_height(task_info: TaskInfo):
         properties=["height"],
         reducer=ee.Reducer.max()
     ).unmask(0).rename(dataset_name)
-        
+
     # Download
-    data_array = _download_processed_image(height_raster, task_info, band_name=dataset_name)
+    data_array = _download_processed_image(
+        height_raster, task_info, band_name=dataset_name)
 
     return DataWithMetadata(
         name=dataset_name,
         data=[data_array],
         timestamps=[task_info.t_start],
         source=f"Global Building Atlas (Tiles: {len(tile_paths)})",
+        resolution=3,
         unit="m"
     )
+
+
+def download_eca(task_info: TaskInfo) -> DataWithMetadata:
+    log.info(f"Downloading ECA data for event_id: {task_info.event_id}")
+    data = download_gee_task(
+        task_info,
+        dataset_name="landcover",
+        band="Map",
+        imagecollection="ESA/WorldCover/v200",
+        resample='nearest',
+    )
+    data.data[0] = np.around(data.data[0]).astype(np.int16)
+    data.resolution = 10
+    data.unit = "class"
+    data.note = {
+        10: "Tree cover",
+        20: "Shrubland",
+        30: "Grassland",
+        40: "Cropland",
+        50: "Built-up",
+        60: "Bare / sparse vegetation",
+        70: "Snow and ice",
+        80: "Permanent water bodies",
+        90: "Herbaceous wetland",
+        95: "Mangroves",
+        100: "Moss and lichen",
+    }
+    return data
+
 
 def download_tc(task_info: TaskInfo):
     log.info(
         f"Downloading LAI data for event_id: {task_info.event_id}")
 
-    # TODO
+    ASSET_ROOT = 'projects/tc-global-urban/assets/'
+    FILENAMES = [
+        'LAI_Grid_30deg_101_2020-07-02', 'LAI_Grid_30deg_102_2020-07-02', 'LAI_Grid_30deg_103_2020-07-02',
+        'LAI_Grid_30deg_104_2020-07-02', 'LAI_Grid_30deg_105_2020-07-02', 'LAI_Grid_30deg_107_2020-07-02',
+        'LAI_Grid_30deg_108_2020-07-02', 'LAI_Grid_30deg_0_2020-07-02',   'LAI_Grid_30deg_1_2020-07-02',
+        'LAI_Grid_30deg_2_2020-07-02',   'LAI_Grid_30deg_3_2020-07-02',   'LAI_Grid_30deg_4_2020-07-02',
+        'LAI_Grid_30deg_5_2020-07-02',   'LAI_Grid_30deg_6_2020-07-02',   'LAI_Grid_30deg_7_2020-07-02',
+        'LAI_Grid_30deg_8_2020-07-02',   'LAI_Grid_30deg_9_2020-07-02',   'LAI_Grid_30deg_10_2020-07-02',
+        'LAI_Grid_30deg_11NE_2020-07-02', 'LAI_Grid_30deg_11NW_2020-07-02', 'LAI_Grid_30deg_11SE_2020-07-02',
+        'LAI_Grid_30deg_11SW_2020-07-02', 'LAI_Grid_30deg_12_2020-07-02',  'LAI_Grid_30deg_13_2020-07-02',
+        'LAI_Grid_30deg_14_2020-07-02',  'LAI_Grid_30deg_15_2020-07-02',  'LAI_Grid_30deg_16NE_2020-07-02',
+        'LAI_Grid_30deg_16NW_2020-07-02', 'LAI_Grid_30deg_16SE_2020-07-02', 'LAI_Grid_30deg_16SW_2020-07-02',
+        'LAI_Grid_30deg_17_2020-07-02',  'LAI_Grid_30deg_18_2020-07-02',  'LAI_Grid_30deg_19_2020-07-02',
+        'LAI_Grid_30deg_20_2020-07-02',  'LAI_Grid_30deg_21NE_2020-07-02', 'LAI_Grid_30deg_21NW_2020-07-02',
+        'LAI_Grid_30deg_21SE_2020-07-02', 'LAI_Grid_30deg_21SW_2020-07-02', 'LAI_Grid_30deg_22_2020-07-02',
+        'LAI_Grid_30deg_23_2020-07-02',  'LAI_Grid_30deg_24_2020-07-02',  'LAI_Grid_30deg_25_2020-07-02',
+        'LAI_Grid_30deg_26_2020-07-02',  'LAI_Grid_30deg_27_2020-07-02',  'LAI_Grid_30deg_28_2020-07-02',
+        'LAI_Grid_30deg_29_2020-07-02',  'LAI_Grid_30deg_30_2020-07-02',  'LAI_Grid_30deg_31_2020-07-02',
+        'LAI_Grid_30deg_32_2020-07-02',  'LAI_Grid_30deg_33_2020-07-02',  'LAI_Grid_30deg_34_2020-07-02',
+        'LAI_Grid_30deg_35_2020-07-02',  'LAI_Grid_30deg_36_2020-07-02',  'LAI_Grid_30deg_37_2020-07-02',
+        'LAI_Grid_30deg_38_2020-07-02',  'LAI_Grid_30deg_39_2020-07-02',  'LAI_Grid_30deg_40_2020-07-02',
+        'LAI_Grid_30deg_41_2020-07-02',  'LAI_Grid_30deg_42_2020-07-02',  'LAI_Grid_30deg_43_2020-07-02',
+        'LAI_Grid_30deg_44_2020-07-02',  'LAI_Grid_30deg_45_2020-07-02',  'LAI_Grid_30deg_46_2020-07-02',
+        'LAI_Grid_30deg_47_2020-07-02',  'LAI_Grid_30deg_48_2020-07-02',  'LAI_Grid_30deg_49_2020-07-02',
+        'LAI_Grid_30deg_50_2020-07-02',  'LAI_Grid_30deg_51_2020-07-02',  'LAI_Grid_30deg_52_2020-07-02',
+        'LAI_Grid_30deg_53_2020-07-02',  'LAI_Grid_30deg_54_2020-07-02',  'LAI_Grid_30deg_55_2020-07-02',
+        'LAI_Grid_30deg_56_2020-07-02',  'LAI_Grid_30deg_101_2020-07-02', 'LAI_Grid_30deg_102_2020-07-02',
+        'LAI_Grid_30deg_103_2020-07-02', 'LAI_Grid_30deg_104_2020-07-02', 'LAI_Grid_30deg_105_2020-07-02',
+        'LAI_Grid_30deg_107_2020-07-02', 'LAI_Grid_30deg_108_2020-07-02'
+    ]
+
+    # Build Image Objects
+    # --------------------------------------
+    # We must construct ee.Image objects and rename the band to 'LAI'
+    # *before* passing to download_gee_task.
+    # The generic function expects a collection where .select(band) works immediately.
+
+    def prepare_lai_image(filename):
+        # Load image, select the first band (index 0), and normalize name to 'lai'
+        return ee.Image(ASSET_ROOT + filename).select([0]).rename('lai')
+
+    # Create a Python list of ee.Image objects
+    image_list = [prepare_lai_image(name) for name in FILENAMES]
+
+    # Call Generic Downloader
+    data = download_gee_task(
+        task_info=task_info,
+        dataset_name="lai",
+        imagecollection=image_list,
+        band="lai",
+        resample='bilinear'
+    )
+
+    data.resolution = 10
+    data.unit = "m2/m2"
+
+    return data
 
 
 def main() -> None:
-    
-    # TODO LANDCOVER: resample using nearest neighbor
 
     global GEE_PROJECT_ID
     global HERBIE_CACHE_DIR
@@ -692,7 +757,7 @@ def main() -> None:
     GEE_PROJECT_ID = args.gee_project_id
     HERBIE_CACHE_DIR = args.herbie_cache_dir
 
-    log_level = logging.INFO if args.verbose else logging.WARNING
+    log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=log_level)  # Simplified format
 
     event_id = args.event_id
@@ -727,8 +792,18 @@ def main() -> None:
         log.debug(f"Downloaded HRRR data: {hrrr_data}")
         save_numpy(task_info, hrrr_data, args.output_dir)
 
-    download_building_height(task_info)
-    download_tc(task_info)
+    building_height = download_building_height(task_info)
+    log.debug(f"Processed building height data: {building_height}")
+    save_numpy(task_info, building_height, args.output_dir)
+
+    landcover = download_eca(task_info)
+    log.debug(f"Processed landcover data: {landcover}")
+    save_numpy(task_info, landcover, args.output_dir)
+
+    lai = download_tc(task_info)
+    log.debug(f"Processed LAI data: {lai}")
+    save_numpy(task_info, lai, args.output_dir)
+
 
 def plot(data, *args, **kwargs):
     import matplotlib.pyplot as plt
@@ -737,55 +812,7 @@ def plot(data, *args, **kwargs):
     plt.colorbar(label='Value')
     plt.show()
 
+
 if __name__ == "__main__":
-    
-    # main()
 
-    log_level = logging.INFO
-    logging.basicConfig(level=log_level)  # Simplified format
-    output_dir = 'output'
-
-    event_id = 'CA3982012144020181108'
-    fire_info = get_fire_info(event_id)
-
-    log.info(f"Retrieved fire info for event_id: {event_id}")
-    log.debug(f"Generated fire info: {fire_info}")
-
-    task_info = get_task_info(
-        fire_info, resolution=30, buffer=20, crs="EPSG:5070")
-
-    # log.debug(f"Generated task info: {task_info}")
-    # save_numpy(task_info, DataWithMetadata(
-    #     name="task_info", data=[task_info]), output_dir)
-
-    # feds25mtbs = process_feds25mtbs(task_info)
-    # log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
-    # save_numpy(task_info, feds25mtbs, output_dir)
-
-    # elevation = download_usgs(task_info)
-    # log.debug(f"Downloaded elevation data: {elevation}")
-    # save_numpy(task_info, elevation, output_dir)
-
-    # landfire = download_landfire(task_info)
-    # for lf_data in landfire:
-    #     log.debug(f"Downloaded LANDFIRE data: {lf_data}")
-    #     save_numpy(task_info, lf_data, output_dir)
-
-    # hrrr = download_hrrr(task_info)
-
-    # for hrrr_data in hrrr:
-    #     log.debug(f"Downloaded HRRR data: {hrrr_data}")
-    #     save_numpy(task_info, hrrr_data, output_dir)
-
-    # building_height = download_building_height(task_info)
-    # log.debug(f"Processed building height data: {building_height}")
-    # save_numpy(task_info, building_height, output_dir)
-
-    lai = download_tc(task_info)
-    log.debug(f"Processed LAI data: {building_height}")
-    save_numpy(task_info, building_height, output_dir)
-
-    data = load_numpy('output/CA3982012144020181108/lai.npy').data[0]
-
-    print(np.unique(data))
-    
+    main()
