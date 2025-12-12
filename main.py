@@ -1,11 +1,12 @@
 from affine import Affine
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from herbie import Herbie
 from pyproj import Transformer
 from rasterio import features
 from rasterio.enums import Resampling
 from rasterio.transform import from_origin
+from scipy.ndimage import distance_transform_edt
 from shapely.geometry import box, MultiPolygon
 from tqdm import tqdm
 from typing import Any, Literal, Optional
@@ -64,7 +65,7 @@ class DataWithMetadata:
     source: Optional[str] = None
     resolution: Optional[int] = None
     unit: Optional[str] = None
-    note: Optional[Any] = None
+    note: dict[str, Any] = {}
 
 
 def get_fire_info(event_id: str, firelist_path: str = 'datasets/FEDS25MTBS/fireslist2012-2023.csv') -> FireInfo:
@@ -229,6 +230,124 @@ def process_feds25mtbs(task_info: TaskInfo, base_dir: str = 'datasets/FEDS25MTBS
     )
 
 
+def signed_bwdist(im: np.ndarray) -> np.ndarray:
+    '''
+    Computes the Signed Distance Field (SDF) for a binary image.
+
+    Pixels inside the shape are positive (distance to boundary).
+    Pixels outside the shape are negative (distance to boundary).
+    '''
+    # Ensure boolean
+    im = im.astype(bool)
+
+    # distance_transform_edt calculates distance to the closest ZERO.
+    # So for the inner distance, we use the image itself.
+    # For the outer distance, we use the inverse of the image.
+    inner_dist = distance_transform_edt(im)
+    outer_dist = distance_transform_edt(~im)
+
+    # Combine: Inside is positive, Outside is negative.
+    # We subtract outer_dist from inner_dist.
+    # (Note: Boundary pixels might be close to 0)
+    return inner_dist - outer_dist
+
+
+def interp_shape(array_a: np.ndarray, array_b: np.ndarray, precision: float = 0.5) -> np.ndarray:
+    '''
+    Interpolate between two contours (boolean masks)
+
+    ref: https://stackoverflow.com/questions/48818373/interpolate-between-two-images
+
+    Input: array_a (top)
+            [X,Y] bool - Image of first shape
+           array_b (bottom)
+            [X,Y] bool - Image of second shape
+           precision
+             float - 0.0 to 1.0 (0.0 = array_a, 1.0 = array_b)
+
+    Output: out
+            [X,Y] bool - Interpolated shape
+    '''
+    if array_a.shape != array_b.shape:
+        raise ValueError(f"Shape mismatch: {array_a.shape} vs {array_b.shape}")
+
+    if not (0 <= precision <= 1):
+        raise ValueError("Precision must be between 0 and 1")
+
+    # Get Signed Distance Functions
+    sdf_a = signed_bwdist(array_a)
+    sdf_b = signed_bwdist(array_b)
+
+    # Linear Interpolation of the SDFs
+    # Formula: (1 - t) * A + t * B
+    interpolated_sdf = (1 - precision) * sdf_a + precision * sdf_b
+
+    # Threshold back to boolean
+    # Any value > 0 represents the inside of the new shape
+    out = interpolated_sdf > 0
+
+    return out
+
+
+def interpolate_burn_perimeters(data: DataWithMetadata, multiplier: int) -> DataWithMetadata:
+    # Validation: Cannot interpolate if fewer than 2 frames
+    if not data.data or len(data.data) < 2:
+        return data
+
+    n_original = len(data.data)
+    new_data_list = []
+
+    assert (data.timestamps is not None) and (
+        len(data.timestamps) == n_original)
+    new_timestamps = []
+
+    # Iterate through pairs of existing data
+    for i in range(n_original - 1):
+        # 1. Get current pair
+        curr_frame = data.data[i]
+        next_frame = data.data[i+1]
+
+        # 2. Append the start frame of this pair
+        new_data_list.append(curr_frame)
+
+        # 3. Handle start timestamp
+        curr_time = data.timestamps[i]
+        next_time = data.timestamps[i+1]
+        new_timestamps.append(curr_time)
+        time_diff = next_time - curr_time
+
+        # 4. Generate Intermediates
+        # We need 'multiplier' steps.
+        # Denominator is multiplier + 1 (e.g., 1 intermediate = 1/2 split)
+        steps = multiplier + 1
+
+        for step in range(1, steps):
+            # Calculate precision factor (t) between 0 and 1
+            t = step / steps
+
+            # Interpolate Shape
+            interp_frame = interp_shape(curr_frame, next_frame, precision=t)
+            new_data_list.append(interp_frame)
+
+            # Interpolate Time
+            # Calculate delta and add to current time
+            interp_time = curr_time + (time_diff * t)
+            new_timestamps.append(interp_time)
+
+    # 5. Append the very last original frame/timestamp (the end of the chain)
+    new_data_list.append(data.data[-1])
+    new_timestamps.append(data.timestamps[-1])
+
+    # 6. Return new object, preserving other metadata
+    # We use replace() to create a copy with updated fields
+    return replace(
+        data,
+        data=new_data_list,
+        timestamps=new_timestamps,
+        note=data.note | {'interpolate': multiplier}
+    )
+
+
 def _ensure_ee_initialized() -> None:
     try:
         # Check if initialized by trying a simple operation
@@ -325,10 +444,12 @@ def download_usgs(task_info: TaskInfo) -> DataWithMetadata:
         imagecollection="USGS/3DEP/1m",
         resample='bilinear',
     )
-    data.data[0] = np.around(data.data[0]).astype(np.int16)
-    data.resolution = 1
-    data.unit = "m"
-    return data
+    return replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=1,
+        unit="m",
+    )
 
 
 def download_landfire(task_info: TaskInfo) -> list[DataWithMetadata]:
@@ -342,10 +463,12 @@ def download_landfire(task_info: TaskInfo) -> list[DataWithMetadata]:
         imagecollection="projects/sat-io/open-datasets/landfire/FUEL/CBD",
         resample='bilinear',
     )
-    data.data[0] = np.around(data.data[0]).astype(np.int16)
-    data.resolution = 30
-    data.unit = "100kg/m^3"
-    payload.append(data)
+    payload.append(replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=30,
+        unit="100kg/m^3",
+    ))
 
     data = download_gee_task(
         task_info,
@@ -354,10 +477,12 @@ def download_landfire(task_info: TaskInfo) -> list[DataWithMetadata]:
         imagecollection="projects/sat-io/open-datasets/landfire/FUEL/CC",
         resample='bilinear',
     )
-    data.data[0] = np.around(data.data[0]).astype(np.int16)
-    data.resolution = 30
-    data.unit = "%"
-    payload.append(data)
+    payload.append(replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=30,
+        unit="%",
+    ))
 
     return payload
 
@@ -635,7 +760,7 @@ def download_building_height(task_info: TaskInfo):
         timestamps=[task_info.t_start],
         source=f"Global Building Atlas (Tiles: {len(tile_paths)})",
         resolution=3,
-        unit="m"
+        unit="m",
     )
 
 
@@ -648,23 +773,26 @@ def download_eca(task_info: TaskInfo) -> DataWithMetadata:
         imagecollection="ESA/WorldCover/v200",
         resample='nearest',
     )
-    data.data[0] = np.around(data.data[0]).astype(np.int16)
-    data.resolution = 10
-    data.unit = "class"
-    data.note = {
-        10: "Tree cover",
-        20: "Shrubland",
-        30: "Grassland",
-        40: "Cropland",
-        50: "Built-up",
-        60: "Bare / sparse vegetation",
-        70: "Snow and ice",
-        80: "Permanent water bodies",
-        90: "Herbaceous wetland",
-        95: "Mangroves",
-        100: "Moss and lichen",
-    }
-    return data
+    return replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=10,
+        unit="class",
+        note=data.note | {'mapping': {
+            0: "No Data",
+            10: "Tree cover",
+            20: "Shrubland",
+            30: "Grassland",
+            40: "Cropland",
+            50: "Built-up",
+            60: "Bare / sparse vegetation",
+            70: "Snow and ice",
+            80: "Permanent water bodies",
+            90: "Herbaceous wetland",
+            95: "Mangroves",
+            100: "Moss and lichen",
+        }}
+    )
 
 
 def download_tc(task_info: TaskInfo):
@@ -724,10 +852,12 @@ def download_tc(task_info: TaskInfo):
         resample='bilinear'
     )
 
-    data.resolution = 10
-    data.unit = "m2/m2"
-
-    return data
+    return replace(
+        data,
+        data=[data_array.astype(np.float32) for data_array in data.data],
+        resolution=10,
+        unit="m2/m2",
+    )
 
 
 def main() -> None:
