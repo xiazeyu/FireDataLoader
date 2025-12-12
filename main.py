@@ -167,6 +167,7 @@ def process_feds25mtbs(task_info: TaskInfo, base_dir: str = 'datasets/FEDS25MTBS
 
     for _, row in gdf.iterrows():
         timestamp = pd.to_datetime(row['t'])
+        timestamp = timestamp.to_pydatetime()
         geom = row.geometry
 
         if geom is None:
