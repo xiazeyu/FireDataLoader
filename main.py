@@ -564,10 +564,10 @@ def download_hrrr(task_info: TaskInfo, delta_hour: int = 1) -> list[DataWithMeta
     pbar = tqdm(timestamps_iter)
     for current_time in pbar:
         log.info(f"Processing HRRR data for timestamp: {current_time}")
+        pbar.set_description(
+                f"Processing HRRR on {current_time.strftime('%Y-%m-%d %H:%M')}")
 
         try:
-            pbar.set_description(
-                f"Processing HRRR on {current_time.strftime('%Y-%m-%d %H:%M')}")
             H = Herbie(
                 current_time,
                 model='hrrr',
@@ -576,33 +576,32 @@ def download_hrrr(task_info: TaskInfo, delta_hour: int = 1) -> list[DataWithMeta
                 save_dir=HERBIE_CACHE_DIR,
                 verbose=log.level >= logging.INFO,
             )
-
+            ds_rh = None
+            ds_wind = None
             try:
                 ds_rh = H.xarray(":RH:2 m", remove_grib=False)
+                ds_rh = clip_hrrr_to_task(ds_rh, task_info)
+                data_buffer['r2'].append(ds_rh.r2.values)
+            except Exception as e_rh:
+                log.error(f"⚠️ PARTIAL: Could not retrieve/process r2 for {current_time}. Error: {e_rh}")
+            try:
                 ds_wind = H.xarray(":(?:UGRD|VGRD):10 m", remove_grib=False)
-            except ValueError as e:
-                if "No index file" in str(e):
-                    tqdm.write(
-                        f"⚠️ Index missing for {current_time}. Attempting full download...")
-                    H.download()
-                    ds_rh = H.xarray(":RH:2 m", remove_grib=False)
-                    ds_wind = H.xarray(
-                        ":(?:UGRD|VGRD):10 m", remove_grib=False)
-                else:
-                    raise e
+                ds_wind = clip_hrrr_to_task(ds_wind, task_info)
+                data_buffer['u10'].append(ds_wind.u10.values)
+                data_buffer['v10'].append(ds_wind.v10.values)
+            except Exception as e_wind:
+                log.error(f"⚠️ PARTIAL: Could not retrieve/process u10/v10 for {current_time}. Error: {e_wind}")
+            
+            if (ds_rh is None) and (ds_wind is None):
+                raise ValueError("Incomplete data retrieval for this timestamp.")
+            else:
+                timestamps.append(current_time)
 
-            ds_rh = clip_hrrr_to_task(ds_rh, task_info)
-            data_buffer['r2'].append(ds_rh.r2.values)
-
-            ds_wind = clip_hrrr_to_task(ds_wind, task_info)
-            data_buffer['u10'].append(ds_wind.u10.values)
-            data_buffer['v10'].append(ds_wind.v10.values)
-            timestamps.append(current_time)
         except Exception as e:
-            # CATCH-ALL: If data is missing from ALL sources
-            log.error(
-                f"❌ DATA GAP: Could not retrieve {current_time} on HRRR via Herbie. Skipping. Error: {e}")
+            # CATCH-ALL: If retrieval (primary AND fallback) OR processing fails
+            log.error(f"❌ DATA GAP: Could not retrieve/process {current_time}. Error: {e}")
             continue
+
 
     if not timestamps:
         raise ValueError("No HRRR data downloaded.")
