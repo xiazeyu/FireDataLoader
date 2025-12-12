@@ -877,6 +877,8 @@ def main() -> None:
                         default="output", help="Output directory for saved data")
     parser.add_argument("-p", "--gee_project_id", type=str,
                         default=GEE_PROJECT_ID, help="Google Earth Engine project ID")
+    parser.add_argument("-t", "--interpolation", type=int,
+                        default=0, help="Interpolate burn perimeters with given multiplier")
     parser.add_argument("--herbie_cache_dir", type=str,
                         default=HERBIE_CACHE_DIR, help="Directory for Herbie cache")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -905,6 +907,14 @@ def main() -> None:
 
     feds25mtbs = process_feds25mtbs(task_info)
     log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
+    
+    if args.interpolation > 0:
+        log.info(
+            f"Interpolating burn perimeters with multiplier: {args.interpolation}")
+        feds25mtbs = interpolate_burn_perimeters(
+            feds25mtbs, multiplier=args.interpolation)
+        log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
+    
     save_numpy(task_info, feds25mtbs, args.output_dir)
 
     elevation = download_usgs(task_info)
