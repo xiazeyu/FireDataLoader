@@ -1,5 +1,5 @@
 from affine import Affine
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, replace, field
 from datetime import datetime, timedelta
 from herbie import Herbie
 from pyproj import Transformer
@@ -65,7 +65,7 @@ class DataWithMetadata:
     source: Optional[str] = None
     resolution: Optional[int] = None
     unit: Optional[str] = None
-    note: dict[str, Any] = {}
+    note: dict[str, Any] = field(default_factory=dict)
 
 
 def get_fire_info(event_id: str, firelist_path: str = 'datasets/FEDS25MTBS/fireslist2012-2023.csv') -> FireInfo:

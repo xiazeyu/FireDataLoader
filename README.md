@@ -13,3 +13,7 @@ Install [uv](https://github.com/astral-sh/uv).
 ### Usage
 
 - `python main.py --help`
+
+### Known Issue
+
+- wgrib2 is required.
