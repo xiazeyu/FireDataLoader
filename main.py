@@ -10,6 +10,8 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 - Global Building Atlas: Building heights
 - ESA WorldCover: Land cover classification
 - Tree Canopy: Leaf Area Index (LAI)
+- NAIP/Sentinel-2: Satellite imagery (RGB)
+- Hillshade: Terrain visualization derived from elevation
 
 Prerequisites:
     Set your Google Earth Engine project before running:
@@ -1299,6 +1301,156 @@ def download_tc(task_info: TaskInfo) -> DataWithMetadata:
 
 
 # =============================================================================
+# Satellite Imagery Functions
+# =============================================================================
+
+def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
+    """Download satellite imagery (RGB) from NAIP or Sentinel-2.
+    
+    Attempts to download high-resolution NAIP imagery (1m) for US locations.
+    Falls back to Sentinel-2 (10m) if NAIP is not available.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        DataWithMetadata containing RGB satellite imagery as (H, W, 3) array.
+    """
+    log.info(f"Downloading satellite imagery for event_id: {task_info.event_id}")
+    _ensure_ee_initialized()
+    
+    roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
+    
+    # Try NAIP first (US only, 1m resolution)
+    try:
+        # Get NAIP imagery around the fire start date
+        year = task_info.year
+        naip = ee.ImageCollection("USDA/NAIP/DOQQ") \
+            .filterBounds(roi) \
+            .filter(ee.Filter.calendarRange(year - 1, year + 1, 'year')) \
+            .select(['R', 'G', 'B'])
+        
+        if naip.size().getInfo() > 0:
+            log.info("Using NAIP imagery (1m resolution)")
+            image = naip.mosaic()
+            source = "USDA NAIP"
+            native_res = 1
+        else:
+            raise ValueError("No NAIP imagery available")
+            
+    except Exception as e:
+        log.info(f"NAIP not available ({e}), falling back to Sentinel-2")
+        
+        # Fall back to Sentinel-2 (global, 10m resolution)
+        # Get cloud-free imagery around fire start date
+        start_date = task_info.t_start.strftime('%Y-%m-%d')
+        end_date = (task_info.t_start + timedelta(days=180)).strftime('%Y-%m-%d')
+        
+        s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+            .filterBounds(roi) \
+            .filterDate(start_date, end_date) \
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) \
+            .select(['B4', 'B3', 'B2'])  # RGB bands
+        
+        if s2.size().getInfo() == 0:
+            # Try a wider date range
+            start_date = f"{task_info.year}-01-01"
+            end_date = f"{task_info.year}-12-31"
+            s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+                .filterBounds(roi) \
+                .filterDate(start_date, end_date) \
+                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)) \
+                .select(['B4', 'B3', 'B2'])
+        
+        image = s2.median().rename(['R', 'G', 'B'])
+        # Scale Sentinel-2 values to 0-255 range
+        image = image.divide(10000).multiply(255).clamp(0, 255)
+        source = "Copernicus Sentinel-2"
+        native_res = 10
+    
+    # Download RGB bands
+    rgb_data = []
+    for band in ['R', 'G', 'B']:
+        band_image = image.select(band).reproject(
+            crs=task_info.crs,
+            scale=task_info.resolution
+        )
+        data_array = _download_processed_image(band_image, task_info, band)
+        rgb_data.append(data_array)
+    
+    # Stack into (H, W, 3) array
+    rgb_array = np.stack(rgb_data, axis=-1).astype(np.uint8)
+    
+    log.info(f"✓ Downloaded satellite imagery: {rgb_array.shape}")
+    
+    return DataWithMetadata(
+        name="satellite",
+        data=[rgb_array],
+        timestamps=[task_info.t_start],
+        source=source,
+        resolution=native_res,
+        unit="RGB (0-255)",
+        note={'description': 'True color satellite imagery'},
+    )
+
+
+# =============================================================================
+# Hillshade (Terrain Visualization) Functions
+# =============================================================================
+
+def download_hillshade(task_info: TaskInfo) -> DataWithMetadata:
+    """Download hillshade terrain visualization from Google Earth Engine.
+    
+    Computes hillshade from elevation data to create a terrain visualization
+    similar to Google Maps terrain view. Hillshade simulates illumination
+    from a light source to show terrain relief.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        DataWithMetadata containing hillshade values (0-255).
+    """
+    log.info(f"Downloading hillshade for event_id: {task_info.event_id}")
+    _ensure_ee_initialized()
+    
+    roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
+    
+    # Get elevation data
+    collection = ee.ImageCollection("USGS/3DEP/1m").filterBounds(roi)
+    
+    if collection.size().getInfo() == 0:
+        # Fallback to SRTM if 3DEP not available
+        log.info("3DEP not available, falling back to SRTM 30m")
+        elevation = ee.Image("USGS/SRTMGL1_003").select('elevation')
+        native_res = 30
+    else:
+        native_proj = collection.first().select('elevation').projection()
+        elevation = collection.mosaic().select('elevation')
+        elevation = elevation.setDefaultProjection(native_proj)
+        native_res = 1
+    
+    # Compute hillshade using ee.Terrain.hillshade
+    # Default azimuth=315 (NW), elevation=45 degrees - standard cartographic lighting
+    hillshade = ee.Terrain.hillshade(elevation, azimuth=315, elevation=45)
+    hillshade = hillshade.resample('bilinear').rename('hillshade')
+    
+    data_array = _download_processed_image(hillshade, task_info, 'hillshade')
+    
+    log.info("✓ Downloaded hillshade data")
+    
+    return DataWithMetadata(
+        name="hillshade",
+        data=[data_array.astype(np.uint8)],
+        timestamps=[task_info.t_start],
+        source="Computed from USGS 3DEP/SRTM via Google Earth Engine",
+        resolution=native_res,
+        unit="0-255",
+        note={'description': 'Terrain hillshade visualization (azimuth=315°, elevation=45°)'},
+    )
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -1406,6 +1558,8 @@ def main() -> None:
         ("building_height", download_building_height, (task_info,)),
         ("landcover", download_eca, (task_info,)),
         ("lai", download_tc, (task_info,)),
+        ("satellite", download_satellite, (task_info,)),
+        ("hillshade", download_hillshade, (task_info,)),
     ]
     
     results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
@@ -1451,7 +1605,7 @@ def main() -> None:
         failed_tasks = still_failed
     
     # Save successful results
-    for name in ["elevation", "building_height", "landcover", "lai"]:
+    for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade"]:
         if name in results and not isinstance(results[name], Exception):
             data = results[name]
             log.debug(f"Downloaded {name} data: {data}")

@@ -13,6 +13,8 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 | Global Building Atlas | Building heights | 3m |
 | ESA WorldCover | Land cover classification | 10m |
 | Tree Canopy LAI | Leaf Area Index | 10m |
+| NAIP/Sentinel-2 | Satellite imagery (RGB) | 1m/10m |
+| Hillshade | Terrain visualization (from elevation) | 1m |
 
 ## Installation
 
@@ -88,17 +90,19 @@ Data is saved as `.npy` files in `output/<event_id>/`:
 
 ```
 output/CA3859812261820171009/
-├── task_info.npy      # Processing configuration
-├── burn_perimeters.npy # Fire perimeter time series
-├── elevation.npy      # Terrain elevation
-├── cbd.npy            # Canopy Bulk Density
-├── cc.npy             # Canopy Cover
-├── r2.npy             # Relative humidity
-├── u10.npy            # Wind U component
-├── v10.npy            # Wind V component
-├── building_height.npy # Building heights
-├── landcover.npy      # Land cover classes
-└── lai.npy            # Leaf Area Index
+├── task_info.npy         # Processing configuration
+├── burn_perimeters.npy   # Fire perimeter time series
+├── elevation.npy         # Terrain elevation
+├── cbd.npy               # Canopy Bulk Density
+├── cc.npy                # Canopy Cover
+├── r2.npy                # Relative humidity
+├── u10.npy               # Wind U component
+├── v10.npy               # Wind V component
+├── building_height.npy   # Building heights
+├── landcover.npy         # Land cover classes
+├── lai.npy               # Leaf Area Index
+├── satellite.npy         # RGB satellite imagery (NAIP/Sentinel-2)
+└── hillshade.npy         # Terrain hillshade visualization
 ```
 
 ### Visualizing Data

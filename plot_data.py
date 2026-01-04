@@ -53,6 +53,8 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
         'building_height': {'cmap': 'plasma', 'label': 'Building Height (m)'},
         'landcover': {'cmap': 'tab20', 'label': 'Land Cover Class'},
         'lai': {'cmap': 'YlGn', 'label': 'LAI (m²/m²)'},
+        'satellite': {'cmap': None, 'label': 'Satellite (RGB)'},
+        'hillshade': {'cmap': 'gray', 'label': 'Hillshade'},
     }
     
     # Skip task_info for plotting
@@ -105,7 +107,16 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
             if len(data_obj.data) > 1:
                 title += f"\n[Frame 1/{len(data_obj.data)}]"
             
-            plot_single_layer(axes[idx], plot_data, title, cmap=config['cmap'])
+            # Handle RGB images (satellite data) - 3D array with shape (H, W, 3)
+            if plot_data.ndim == 3 and plot_data.shape[2] == 3:
+                im = axes[idx].imshow(plot_data)
+                axes[idx].set_title(title, fontsize=10)
+                axes[idx].axis('off')
+                # Add invisible colorbar to maintain alignment with other plots
+                cbar = plt.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
+                cbar.ax.set_visible(False)
+            else:
+                plot_single_layer(axes[idx], plot_data, title, cmap=config['cmap'])
             
             # Print stats
             print(f"  {name}: shape={plot_data.shape}, "
