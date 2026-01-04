@@ -11,9 +11,26 @@ import os
 import sys
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.colors import ListedColormap, BoundaryNorm
 import numpy as np
 
 from main import load_numpy
+
+# ESA WorldCover land cover classes
+LANDCOVER_CLASSES = {
+    10: ('Tree Cover', '#006400'),           # Dark green
+    20: ('Shrubland', '#ffbb22'),             # Orange/yellow
+    30: ('Grassland', '#ffff4c'),             # Yellow
+    40: ('Cropland', '#f096ff'),              # Pink
+    50: ('Built-up', '#fa0000'),              # Red
+    60: ('Bare/Sparse Vegetation', '#b4b4b4'), # Gray
+    70: ('Snow and Ice', '#f0f0f0'),          # White
+    80: ('Permanent Water Bodies', '#0064c8'), # Blue
+    90: ('Herbaceous Wetland', '#0096a0'),    # Teal
+    95: ('Mangroves', '#00cf75'),             # Green
+    100: ('Moss and Lichen', '#fae6a0'),      # Beige
+}
 
 
 def plot_single_layer(ax, data, title, cmap='viridis', vmin=None, vmax=None):
@@ -22,6 +39,47 @@ def plot_single_layer(ax, data, title, cmap='viridis', vmin=None, vmax=None):
     ax.set_title(title, fontsize=10)
     ax.axis('off')
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+
+def plot_landcover(ax, data, title):
+    """Plot land cover data with discrete legend showing only present classes."""
+    # Find unique values present in data
+    unique_values = np.unique(data)
+    unique_values = unique_values[unique_values != 0]  # Exclude NoData (0)
+    
+    # Filter to only known classes
+    present_classes = [v for v in unique_values if v in LANDCOVER_CLASSES]
+    
+    if not present_classes:
+        ax.imshow(data, cmap='tab20', interpolation='nearest')
+        ax.set_title(title, fontsize=10)
+        ax.axis('off')
+        return
+    
+    # Create colormap for present classes
+    colors = [LANDCOVER_CLASSES[v][1] for v in present_classes]
+    cmap = ListedColormap(colors)
+    
+    # Create boundaries for discrete colormap
+    bounds = present_classes + [present_classes[-1] + 1]
+    norm = BoundaryNorm(bounds, cmap.N)
+    
+    # Plot
+    im = ax.imshow(data, cmap=cmap, norm=norm, interpolation='nearest')
+    ax.set_title(title, fontsize=10)
+    ax.axis('off')
+    
+    # Create a colorbar with class labels (same size as other colorbars for alignment)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    # Set ticks at center of each color segment
+    tick_locs = [v + 0.5 for v in present_classes[:-1]] + [present_classes[-1]]
+    tick_locs = [(present_classes[i] + present_classes[i] + 1) / 2 if i < len(present_classes) - 1 
+                 else present_classes[i] for i in range(len(present_classes))]
+    # Simpler: just use the class values as tick locations
+    cbar.set_ticks(present_classes)
+    cbar.set_ticklabels([LANDCOVER_CLASSES[v][0] for v in present_classes])
+    cbar.ax.tick_params(labelsize=6)
 
 
 def plot_event_data(event_id: str, output_dir: str = 'output'):
@@ -115,6 +173,9 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
                 # Add invisible colorbar to maintain alignment with other plots
                 cbar = plt.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
                 cbar.ax.set_visible(False)
+            # Handle landcover with discrete legend
+            elif name == 'landcover':
+                plot_landcover(axes[idx], plot_data, title)
             else:
                 plot_single_layer(axes[idx], plot_data, title, cmap=config['cmap'])
             
@@ -135,7 +196,7 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
     
     # Save figure
     output_fig = os.path.join(event_path, f'{event_id}_overview.png')
-    plt.savefig(output_fig, dpi=150, bbox_inches='tight')
+    plt.savefig(output_fig, dpi=300, bbox_inches='tight')
     print(f"\nSaved overview plot to: {output_fig}")
     
     plt.show()
