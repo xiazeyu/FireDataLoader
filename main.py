@@ -1,0 +1,1424 @@
+"""
+Fire Data Loader
+================
+
+A tool for downloading and processing wildfire-related geospatial data from multiple sources:
+- FEDS25MTBS: Fire perimeter data
+- USGS 3DEP: Elevation data
+- LANDFIRE: Canopy bulk density and canopy cover
+- HRRR: Weather data (humidity, wind)
+- Global Building Atlas: Building heights
+- ESA WorldCover: Land cover classification
+- Tree Canopy: Leaf Area Index (LAI)
+
+Prerequisites:
+    Set your Google Earth Engine project before running:
+    $ earthengine set_project your-google-cloud-project-id
+
+Usage:
+    python main.py <event_id> [options]
+
+Example:
+    python main.py CA3859812261820171009 -v
+"""
+
+# Standard library imports
+import argparse
+import logging
+import math
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, replace
+from datetime import datetime, timedelta
+from typing import Literal, Callable
+
+# Third-party imports
+import ee
+import geemap
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import rioxarray
+import xarray as xr
+from affine import Affine
+from herbie import Herbie
+from pyproj import Transformer
+from rasterio import features
+from rasterio.enums import Resampling
+from rasterio.transform import from_origin
+from scipy.ndimage import distance_transform_edt
+from shapely.geometry import box, MultiPolygon
+from tqdm import tqdm
+
+# Local imports
+from schemas import FireInfo, TaskInfo, DataWithMetadata
+
+# Configure xarray options
+xr.set_options(use_new_combine_kwarg_defaults=True)
+
+# Module logger
+log = logging.getLogger(__name__)
+
+# Default Herbie cache directory
+DEFAULT_HERBIE_CACHE_DIR = "./datasets/herbie"
+
+
+# =============================================================================
+# Fire Information Functions
+# =============================================================================
+
+def get_fire_info(
+    event_id: str,
+    firelist_path: str = 'datasets/FEDS25MTBS/fireslist2012-2023.csv'
+) -> FireInfo:
+    """Load fire event information from the FEDS25MTBS dataset.
+    
+    Args:
+        event_id: Unique identifier for the fire event.
+        firelist_path: Path to the CSV file containing fire metadata.
+    
+    Returns:
+        FireInfo object containing event details.
+    
+    Raises:
+        AssertionError: If the file doesn't exist or event_id not found.
+    """
+    assert os.path.exists(
+        firelist_path), f"Error: File not found at {firelist_path}"
+
+    df = pd.read_csv(firelist_path)
+
+    df.columns = df.columns.str.strip()
+
+    df['tst'] = pd.to_datetime(df['tst'], errors='coerce')
+    df['ted'] = pd.to_datetime(df['ted'], errors='coerce')
+
+    fire_row = df[df['Event_ID'] == event_id]
+
+    assert not fire_row.empty, f"Error: Event_ID {event_id} not found in the dataset"
+
+    row = fire_row.iloc[0]
+
+    return FireInfo(
+        event_id=row['Event_ID'],
+        name=row['Incid_Name'],
+        year=int(row['Year']),
+        acres_burned=int(row['BurnBndAc']),
+        t_start=row['tst'].to_pydatetime(),
+        t_end=row['ted'].to_pydatetime(),
+        bounds=(row['lon0'], row['lat0'], row['lon1'], row['lat1']),
+    )
+
+
+def get_task_info(
+    fire_info: FireInfo,
+    resolution: int = 30,
+    buffer: int = 100,
+    crs: str = "EPSG:5070",
+) -> TaskInfo:
+    """Create a processing task configuration from fire event information.
+    
+    Transforms the fire bounds to the target CRS, applies a buffer, and
+    calculates the output grid dimensions.
+    
+    Args:
+        fire_info: Fire event information.
+        resolution: Target spatial resolution in meters.
+        buffer: Buffer distance to add around the fire bounds in meters.
+        crs: Target coordinate reference system.
+    
+    Returns:
+        TaskInfo object defining the processing parameters.
+    """
+
+    minx, miny, maxx, maxy = fire_info.bounds
+    bbox_poly = box(minx, miny, maxx, maxy)
+    bounds_gs = gpd.GeoSeries([bbox_poly], crs="EPSG:4326")
+    bounds_proj = bounds_gs.to_crs(crs)
+
+    bounds_proj = bounds_proj.buffer(buffer)
+
+    t_minx, t_miny, t_maxx, t_maxy = bounds_proj.total_bounds
+
+    target_bounds = (
+        math.floor(t_minx / resolution) * resolution,
+        math.floor(t_miny / resolution) * resolution,
+        math.ceil(t_maxx / resolution) * resolution,
+        math.ceil(t_maxy / resolution) * resolution
+    )
+
+    width = int((target_bounds[2] - target_bounds[0]) / resolution)
+    height = int((target_bounds[3] - target_bounds[1]) / resolution)
+
+    return TaskInfo(
+        event_id=fire_info.event_id,
+        name=fire_info.name,
+        year=fire_info.year,
+        t_start=fire_info.t_start,
+        t_end=fire_info.t_end,
+        resolution=resolution,
+        bounds=target_bounds,
+        shape=(height, width),
+        crs=crs,
+    )
+
+
+# =============================================================================
+# I/O Functions
+# =============================================================================
+
+def save_numpy(
+    task_info: TaskInfo,
+    data: DataWithMetadata,
+    output_dir: str = 'output'
+) -> None:
+    """Save processed data to a numpy file.
+    
+    Creates a directory structure: output_dir/event_id/data_name.npy
+    
+    Args:
+        task_info: Task configuration containing event_id.
+        data: Data to save with metadata.
+        output_dir: Base output directory.
+    """
+    event_id = task_info.event_id
+    output_path = os.path.join(output_dir, event_id)
+    os.makedirs(output_path, exist_ok=True)
+
+    output_path = os.path.join(output_path, f"{data.name}.npy")
+    np.save(output_path, asdict(data))
+
+    log.info(f"Saved {data.name} data to {output_path}")
+
+
+def load_numpy(filepath: str) -> DataWithMetadata:
+    """Load processed data from a numpy file.
+    
+    Args:
+        filepath: Path to the .npy file.
+    
+    Returns:
+        DataWithMetadata object with loaded data.
+    """
+    loaded_dict = np.load(filepath, allow_pickle=True).item()
+    obj = DataWithMetadata(**loaded_dict)
+    return obj
+
+
+# =============================================================================
+# FEDS25MTBS Processing
+# =============================================================================
+
+def process_feds25mtbs(
+    task_info: TaskInfo,
+    base_dir: str = 'datasets/FEDS25MTBS'
+) -> DataWithMetadata:
+    """Process FEDS25MTBS fire perimeter data into rasterized time series.
+    
+    Reads the GeoPackage file for the fire event and rasterizes each timestep's
+    perimeter polygon to match the task grid specification.
+    
+    Args:
+        task_info: Task configuration with event details and grid parameters.
+        base_dir: Base directory containing the FEDS25MTBS data.
+    
+    Returns:
+        DataWithMetadata containing boolean rasters for each timestep.
+    
+    Raises:
+        AssertionError: If the GeoPackage file doesn't exist.
+    """
+    log.info(f"Processing FEDS25MTBS for event_id: {task_info.event_id}")
+
+    data_dir = os.path.join(base_dir, str(
+        task_info.year), task_info.event_id + '.gpkg')
+
+    assert os.path.exists(
+        data_dir), f"Error: FEDS25MTBS data not found at {data_dir}"
+
+    gdf = gpd.read_file(data_dir, layer='perimeter')
+
+    data_list = []
+    timestamps = []
+
+    for _, row in gdf.iterrows():
+        timestamp = pd.to_datetime(row['t'])
+        timestamp = timestamp.to_pydatetime()
+        geom = row.geometry
+
+        if geom is None:
+            continue
+
+        if geom.geom_type == 'MultiPolygon':
+            data_list.append(geom)
+        elif geom.geom_type == 'Polygon':
+            data_list.append(MultiPolygon([geom]))
+        else:
+            log.warning(
+                f"Unexpected geometry type: {geom.geom_type} for event_id: {task_info.event_id}")
+            continue
+
+        timestamps.append(timestamp)
+
+    # Calculate grid dimensions from task bounds
+    t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
+
+    res = task_info.resolution
+    transform = from_origin(t_minx, t_maxy, res, res)
+
+    log.info(f"Target Grid: {task_info.shape} pixels @ {res}m resolution")
+
+    # Prepare GeoDataFrame with geometries
+    gdf = gpd.GeoDataFrame({
+        'geometry': data_list,
+        'timestamp': timestamps
+    }, crs="EPSG:4326")
+
+    log.info(
+        f"Reprojecting geometries from EPSG:4326 to target CRS {task_info.crs}"
+    )
+    gdf = gdf.to_crs(task_info.crs)
+
+    # Rasterize each timestep
+    processed_rasters = []
+    for _, row in gdf.iterrows():
+        # Burn value of 1 where polygon exists, 0 elsewhere
+        shapes = [(row.geometry, 1)]
+
+        raster = features.rasterize(
+            shapes=shapes,
+            out_shape=task_info.shape,
+            transform=transform,
+            fill=0,
+            dtype=np.uint8,
+            all_touched=True
+        )
+        assert raster.shape == task_info.shape, (
+            "Rasterized shape does not match target shape"
+        )
+        raster = raster.astype(np.bool)
+        processed_rasters.append(raster)
+
+    return DataWithMetadata(
+        name="burn_perimeters",
+        data=processed_rasters,
+        timestamps=timestamps,
+        source="'FEDS25MTBS; https://doi.org/10.1038/s41597-022-01343-0; requested via SharePoint by Huilin'",
+        resolution=375,
+    )
+
+
+# =============================================================================
+# Interpolation Functions
+# =============================================================================
+
+def signed_bwdist(im: np.ndarray) -> np.ndarray:
+    """Compute the Signed Distance Field (SDF) for a binary image.
+    
+    Pixels inside the shape have positive values (distance to boundary).
+    Pixels outside the shape have negative values (distance to boundary).
+    
+    Args:
+        im: Binary input image.
+    
+    Returns:
+        Signed distance field array.
+    """
+    # Ensure boolean
+    im = im.astype(bool)
+
+    # distance_transform_edt calculates distance to the nearest zero pixel
+    inner_dist = distance_transform_edt(im)
+    outer_dist = distance_transform_edt(~im)
+
+    # Inside is positive, outside is negative
+    return inner_dist - outer_dist
+
+
+def interp_shape(
+    array_a: np.ndarray,
+    array_b: np.ndarray,
+    precision: float = 0.5
+) -> np.ndarray:
+    """Interpolate between two contours (boolean masks) using SDF interpolation.
+    
+    Uses signed distance field interpolation to create smooth transitions
+    between two binary shapes.
+    
+    Reference: https://stackoverflow.com/questions/48818373/interpolate-between-two-images
+    
+    Args:
+        array_a: First binary mask (precision=0.0 returns this).
+        array_b: Second binary mask (precision=1.0 returns this).
+        precision: Interpolation factor between 0.0 and 1.0.
+    
+    Returns:
+        Interpolated binary mask.
+    
+    Raises:
+        ValueError: If shapes don't match or precision is out of range.
+    """
+    if array_a.shape != array_b.shape:
+        raise ValueError(f"Shape mismatch: {array_a.shape} vs {array_b.shape}")
+
+    if not (0 <= precision <= 1):
+        raise ValueError("Precision must be between 0 and 1")
+
+    # Get Signed Distance Functions
+    sdf_a = signed_bwdist(array_a)
+    sdf_b = signed_bwdist(array_b)
+
+    # Linear Interpolation of the SDFs
+    # Formula: (1 - t) * A + t * B
+    interpolated_sdf = (1 - precision) * sdf_a + precision * sdf_b
+
+    # Threshold back to boolean
+    # Any value > 0 represents the inside of the new shape
+    out = interpolated_sdf > 0
+
+    return out
+
+
+def interpolate_burn_perimeters(
+    data: DataWithMetadata,
+    multiplier: int
+) -> DataWithMetadata:
+    """Interpolate additional frames between existing burn perimeter timesteps.
+    
+    Uses SDF-based shape interpolation to create smooth temporal transitions
+    between fire perimeter snapshots.
+    
+    Args:
+        data: Burn perimeter data with timestamps.
+        multiplier: Number of intermediate frames to insert between each pair.
+    
+    Returns:
+        DataWithMetadata with interpolated frames and timestamps.
+    """
+    # Cannot interpolate if fewer than 2 frames
+    if not data.data or len(data.data) < 2:
+        return data
+
+    n_original = len(data.data)
+    new_data_list = []
+
+    assert (data.timestamps is not None) and (
+        len(data.timestamps) == n_original
+    )
+    new_timestamps = []
+
+    # Iterate through consecutive pairs
+    for i in range(n_original - 1):
+        curr_frame = data.data[i]
+        next_frame = data.data[i + 1]
+        curr_time = data.timestamps[i]
+        next_time = data.timestamps[i + 1]
+        time_diff = next_time - curr_time
+
+        # Add original frame
+        new_data_list.append(curr_frame)
+        new_timestamps.append(curr_time)
+
+        # Generate intermediate frames
+        steps = multiplier + 1
+        for step in range(1, steps):
+            t = step / steps
+            interp_frame = interp_shape(curr_frame, next_frame, precision=t)
+            interp_time = curr_time + (time_diff * t)
+            new_data_list.append(interp_frame)
+            new_timestamps.append(interp_time)
+
+    # Add final frame
+    new_data_list.append(data.data[-1])
+    new_timestamps.append(data.timestamps[-1])
+
+    # Return new object with updated fields
+    return replace(
+        data,
+        data=new_data_list,
+        timestamps=new_timestamps,
+        note=data.note | {'interpolate': multiplier}
+    )
+
+
+# =============================================================================
+# Google Earth Engine Functions
+# =============================================================================
+
+class GEEProjectNotConfiguredError(Exception):
+    """Raised when Google Earth Engine project is not configured."""
+    pass
+
+
+def _ensure_ee_initialized() -> None:
+    """Ensure Google Earth Engine is initialized.
+    
+    Uses the project configured via `earthengine set_project` command.
+    Prompts for authentication if needed.
+    
+    Raises:
+        GEEProjectNotConfiguredError: If no GEE project is configured.
+    """
+    try:
+        # Check if already initialized
+        ee.Number(1).getInfo()
+    except Exception:
+        log.info("Earth Engine not initialized. Attempting to initialize...")
+        try:
+            ee.Initialize()
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "project" in error_msg or "quota" in error_msg or "credentials" in error_msg:
+                log.info("Authentication required. Opening browser...")
+                ee.Authenticate()
+                try:
+                    ee.Initialize()
+                except Exception as init_error:
+                    raise GEEProjectNotConfiguredError(
+                        "\n\n" + "="*60 + "\n"
+                        "Google Earth Engine project not configured!\n"
+                        + "="*60 + "\n\n"
+                        "Please set your GEE project by running:\n\n"
+                        "    earthengine set_project YOUR-PROJECT-ID\n\n"
+                        "To find your project ID:\n"
+                        "  1. Go to https://console.cloud.google.com/\n"
+                        "  2. Select or create a project with Earth Engine enabled\n"
+                        "  3. Copy the project ID from the project selector\n\n"
+                        f"Original error: {init_error}\n"
+                    ) from init_error
+            else:
+                raise
+
+
+def _download_processed_image(
+    image: ee.Image,
+    task_info: TaskInfo,
+    band_name: str
+) -> np.ndarray:
+    """Download a processed Earth Engine image as a numpy array.
+    
+    Args:
+        image: Earth Engine image to download.
+        task_info: Task configuration with bounds and shape.
+        band_name: Name of the band to select.
+    
+    Returns:
+        2D numpy array with the downloaded data.
+    
+    Raises:
+        ValueError: If download fails.
+    """
+    _ensure_ee_initialized()
+
+    roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
+
+    log.info(f"Downloading band '{band_name}' via geemap...")
+
+    try:
+        image = image.select(band_name).reproject(
+            crs=task_info.crs,
+            scale=task_info.resolution
+        )
+        data = geemap.ee_to_numpy(
+            image,
+            region=roi,
+        )
+    except Exception as e:
+        log.error(f"Error downloading with geemap: {e}")
+        raise e
+
+    if data is None:
+        raise ValueError("Download failed: geemap returned None.")
+
+    # geemap.ee_to_numpy typically returns shape (Height, Width, Bands).
+    # If the result is 3D with a single band channel, squeeze it to 2D (Height, Width)
+    # to match the behavior of the original NPY extraction.
+    assert data.ndim == 3 and data.shape[2] == 1
+    data = np.squeeze(data, axis=2)
+
+    log.info(f"Downloaded data shape: {data.shape}")
+
+    assert data.shape == task_info.shape, \
+        f"Error: Downloaded data shape {data.shape} does not match expected shape {task_info.shape}"
+
+    return data
+
+
+def download_gee_task(
+    task_info: TaskInfo,
+    dataset_name: str,
+    imagecollection: str | list[ee.Image],
+    band: str,
+    resample: Literal['nearest', 'bilinear', 'bicubic'] = 'bilinear'
+) -> DataWithMetadata:
+    """Download data from a Google Earth Engine ImageCollection.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+        dataset_name: Name for the output data layer.
+        imagecollection: GEE ImageCollection path or list of ee.Image objects.
+        band: Band name to extract.
+        resample: Resampling method ('nearest', 'bilinear', or 'bicubic').
+    
+    Returns:
+        DataWithMetadata containing the downloaded array.
+    
+    Raises:
+        ValueError: If the ROI is outside the collection coverage.
+    """
+
+    log.info(
+        f"Downloading {dataset_name} data for event_id: {task_info.event_id} "
+        f"from Google Earth Engine"
+    )
+
+    _ensure_ee_initialized()
+
+    roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
+    collection = ee.ImageCollection(imagecollection).filterBounds(roi)
+
+    # Handle case where imagecollection is already a list of images
+    if isinstance(imagecollection, list):
+        collection = ee.ImageCollection(imagecollection)
+
+    if collection.size().getInfo() == 0:
+        error_msg = (f"The requested ROI is outside the coverage of {imagecollection}. "
+                     f"Images found: 0. Bounds: {task_info.bounds}")
+        raise ValueError(error_msg)
+
+    native_proj = collection.first().select(band).projection()
+    image = collection.mosaic().select(band)
+    image = image.setDefaultProjection(native_proj)
+
+    if resample != 'nearest':
+        image = image.resample(resample)
+
+    data_array = _download_processed_image(image, task_info, band)
+
+    return DataWithMetadata(
+        name=dataset_name,
+        data=[data_array],
+        timestamps=[task_info.t_start],
+        source=f"Google Earth Engine: {imagecollection}",
+    )
+
+
+# =============================================================================
+# Data Download Functions
+# =============================================================================
+
+def download_usgs(task_info: TaskInfo) -> DataWithMetadata:
+    """Download USGS 3DEP 1m elevation data.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        DataWithMetadata containing elevation in meters (int16).
+    """
+    log.info(f"Downloading USGS data for event_id: {task_info.event_id}")
+    data = download_gee_task(
+        task_info,
+        dataset_name="elevation",
+        band="elevation",
+        imagecollection="USGS/3DEP/1m",
+        resample='bilinear',
+    )
+    return replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=1,
+        unit="m",
+    )
+
+
+def download_landfire(task_info: TaskInfo) -> list[DataWithMetadata]:
+    """Download LANDFIRE fuel data (Canopy Bulk Density and Canopy Cover).
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        List of DataWithMetadata for CBD and CC layers.
+    """
+    log.info(f"Downloading LANDFIRE data for event_id: {task_info.event_id}")
+    payload = []
+
+    data = download_gee_task(
+        task_info,
+        dataset_name="cbd",
+        band="CBD",
+        imagecollection="projects/sat-io/open-datasets/landfire/FUEL/CBD",
+        resample='bilinear',
+    )
+    payload.append(replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=30,
+        unit="100kg/m^3",
+    ))
+
+    data = download_gee_task(
+        task_info,
+        dataset_name="cc",
+        band="CC",
+        imagecollection="projects/sat-io/open-datasets/landfire/FUEL/CC",
+        resample='bilinear',
+    )
+    payload.append(replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=30,
+        unit="%",
+    ))
+
+    return payload
+
+
+# =============================================================================
+# HRRR Weather Data Functions
+# =============================================================================
+
+def clip_hrrr_to_task(
+    hrrr_data: xr.Dataset,
+    task_info: TaskInfo,
+    target_resolution: int = 500
+) -> xr.Dataset:
+    """Clip and reproject HRRR data to match task bounds.
+    
+    Transforms HRRR data from its native Lambert Conformal Conic projection
+    to the task CRS and clips to the task bounds.
+    
+    Args:
+        hrrr_data: HRRR xarray Dataset from Herbie.
+        task_info: Task configuration with bounds and CRS.
+        target_resolution: Output resolution in meters.
+    
+    Returns:
+        Reprojected and clipped xarray Dataset.
+    """
+
+    assert "x" in hrrr_data.dims and "y" in hrrr_data.dims, (
+        "HRRR data must have 'x' and 'y' dimensions"
+    )
+    assert hrrr_data.rio.crs is not None, (
+        "HRRR data must have a valid CRS for reprojection"
+    )
+
+    # Get CRS from Herbie accessor (Lambert Conformal Conic)
+    crs = hrrr_data.herbie.crs
+
+    # Transform coordinates from lat/lon to HRRR projection
+    transformer = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    xx, yy = transformer.transform(
+        hrrr_data.longitude.values, hrrr_data.latitude.values
+    )
+
+    # Extract 1D axes from the rectilinear grid
+    x_coords = xx[0, :]
+    y_coords = yy[:, 0]
+
+    # Assign projected coordinates
+    hrrr_data = hrrr_data.assign_coords(x=x_coords, y=y_coords)
+    hrrr_data = hrrr_data.rio.write_crs(crs)
+
+    # Define output grid
+    minx, miny, maxx, maxy = task_info.bounds
+    width = int((maxx - minx) / target_resolution)
+    height = int((maxy - miny) / target_resolution)
+
+    # Create affine transform for target grid
+    target_transform = Affine.translation(
+        minx, maxy
+    ) * Affine.scale(target_resolution, -target_resolution)
+
+    # Reproject and clip
+    hrrr_data = hrrr_data.rio.reproject(
+        dst_crs=task_info.crs,
+        shape=(height, width),
+        transform=target_transform,
+        resampling=Resampling.bilinear,
+    )
+
+    return hrrr_data
+
+
+def download_hrrr(
+    task_info: TaskInfo,
+    herbie_cache_dir: str = DEFAULT_HERBIE_CACHE_DIR,
+    delta_hour: int = 1
+) -> list[DataWithMetadata]:
+    """Download HRRR weather data (humidity and wind) for the fire duration.
+    
+    Downloads hourly data from NOAA's High-Resolution Rapid Refresh model
+    including relative humidity (r2) and wind components (u10, v10).
+    
+    Args:
+        task_info: Task configuration with time range and bounds.
+        herbie_cache_dir: Directory for caching downloaded GRIB files.
+        delta_hour: Time interval between downloads in hours.
+        batch_size: Number of parallel downloads (default: 4, recommended: 4-8).
+    
+    Returns:
+        List of DataWithMetadata for r2, u10, and v10 variables.
+    
+    Raises:
+        ValueError: If no data could be downloaded.
+    
+    Note:
+        Batch size recommendations:
+        - 4: Conservative, lower memory usage, stable on slower connections
+        - 8: Good balance of speed and reliability
+        - 12+: May hit rate limits or cause memory issues
+    """
+    log.info(f"Downloading HRRR data for event_id: {task_info.event_id}")
+
+    # Build list of timestamps to download
+    timestamps_iter: list[datetime] = []
+    current_time = task_info.t_start
+    while current_time <= task_info.t_end:
+        timestamps_iter.append(current_time)
+        current_time += timedelta(hours=delta_hour)
+
+    if not timestamps_iter:
+        raise ValueError("No time range defined.")
+
+    # Track data gaps
+    data_gaps: list[dict] = []
+
+    def fetch_single_timestamp(ts: datetime) -> dict | None:
+        """Fetch HRRR data for a single timestamp."""
+        try:
+            H = Herbie(
+                ts,
+                model='hrrr',
+                product='sfc',
+                fxx=0,
+                save_dir=herbie_cache_dir,
+                verbose=False,  # Disable verbose for parallel execution
+            )
+            result: dict = {
+                'timestamp': ts, 
+                'r2': None, 'u10': None, 'v10': None,
+                'r2_error': None, 'wind_error': None
+            }
+            
+            try:
+                ds_rh = H.xarray(":RH:2 m", remove_grib=False)
+                ds_rh = clip_hrrr_to_task(ds_rh, task_info)
+                result['r2'] = ds_rh.r2.values
+            except Exception as e_rh:
+                result['r2_error'] = str(e_rh)
+            
+            try:
+                ds_wind = H.xarray(":(?:UGRD|VGRD):10 m", remove_grib=False)
+                ds_wind = clip_hrrr_to_task(ds_wind, task_info)
+                result['u10'] = ds_wind.u10.values
+                result['v10'] = ds_wind.v10.values
+            except Exception as e_wind:
+                result['wind_error'] = str(e_wind)
+            
+            return result
+            
+        except Exception as e:
+            return {'timestamp': ts, 'r2': None, 'u10': None, 'v10': None, 
+                    'r2_error': str(e), 'wind_error': str(e)}
+
+    # Parallel download with progress bar
+    batch_size = 8  # Conservative default, 4-8 recommended
+    results: list[dict] = []
+    
+    log.info(f"Downloading {len(timestamps_iter)} HRRR timestamps (batch size: {batch_size})...")
+    
+    with ThreadPoolExecutor(max_workers=batch_size) as executor:
+        futures = {executor.submit(fetch_single_timestamp, ts): ts for ts in timestamps_iter}
+        
+        with tqdm(total=len(timestamps_iter), desc="HRRR Download") as pbar:
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+                pbar.update(1)
+    
+    # Sort results by timestamp to maintain chronological order
+    results.sort(key=lambda x: x['timestamp'])
+    
+    # Identify and log data gaps
+    for r in results:
+        ts = r['timestamp']
+        has_gap = False
+        gap_info = {'timestamp': ts.isoformat(), 'missing': []}
+        
+        if r['r2'] is None:
+            gap_info['missing'].append('r2')
+            gap_info['r2_error'] = r.get('r2_error', 'Unknown error')
+            has_gap = True
+        if r['u10'] is None:
+            gap_info['missing'].append('u10')
+            gap_info['missing'].append('v10')
+            gap_info['wind_error'] = r.get('wind_error', 'Unknown error')
+            has_gap = True
+        
+        if has_gap:
+            data_gaps.append(gap_info)
+            log.warning(f"📊 DATA GAP at {ts}: missing {', '.join(gap_info['missing'])}")
+    
+    # Filter results with at least some data
+    valid_results = [r for r in results if r['r2'] is not None or r['u10'] is not None]
+    
+    if not valid_results:
+        raise ValueError("No HRRR data downloaded.")
+
+    # Build output data structures
+    timestamps = [r['timestamp'] for r in valid_results]
+    data_buffer: dict[str, list[np.ndarray]] = {
+        'r2': [r['r2'] for r in valid_results if r['r2'] is not None],
+        'u10': [r['u10'] for r in valid_results if r['u10'] is not None],
+        'v10': [r['v10'] for r in valid_results if r['v10'] is not None],
+    }
+
+    n_total = len(timestamps_iter)
+    n_success = len(valid_results)
+    n_gaps = len(data_gaps)
+    
+    log.info(f"HRRR Download Summary: {n_success}/{n_total} timestamps successful, {n_gaps} with data gaps")
+
+    payload = []
+    for var_name, data_list in data_buffer.items():
+        payload.append(DataWithMetadata(
+            name=var_name,
+            data=data_list,
+            timestamps=timestamps,
+            source="HRRR via Herbie",
+            resolution=3000,
+            unit="%" if var_name == 'r2' else "m/s",
+            note={'data_gaps': data_gaps} if data_gaps else {},
+        ))
+
+    return payload
+
+
+def write_data_gap_log(
+    task_info: TaskInfo,
+    data_gaps: list[dict],
+    output_dir: str = 'output'
+) -> None:
+    """Write data gap information to a log file.
+    
+    Args:
+        task_info: Task configuration containing event_id.
+        data_gaps: List of data gap records.
+        output_dir: Base output directory.
+    """
+    import json
+    
+    event_id = task_info.event_id
+    output_path = os.path.join(output_dir, event_id)
+    os.makedirs(output_path, exist_ok=True)
+    
+    log_path = os.path.join(output_path, "data_gaps.json")
+    
+    gap_log = {
+        'event_id': event_id,
+        'generated_at': datetime.now().isoformat(),
+        'total_gaps': len(data_gaps),
+        'gaps': data_gaps
+    }
+    
+    with open(log_path, 'w') as f:
+        json.dump(gap_log, f, indent=2)
+    
+    log.info(f"Data gap log written to {log_path}")
+
+
+# =============================================================================
+# Building and Land Cover Functions
+# =============================================================================
+
+def _format_lat_lon_string(val: int, is_lon: bool) -> str:
+    """Format lat/lon integers for GBA tile filenames.
+    
+    Args:
+        val: Latitude or longitude value.
+        is_lon: True for longitude, False for latitude.
+    
+    Returns:
+        Formatted string (e.g., -120 -> 'w120', 35 -> 'n35').
+    """
+    if is_lon:
+        prefix = 'e' if val >= 0 else 'w'
+        return f"{prefix}{abs(val):03d}"
+    else:
+        prefix = 'n' if val >= 0 else 's'
+        return f"{prefix}{abs(val):02d}"
+
+
+def _get_gba_tile_ids(bounds: tuple[float, float, float, float]) -> list[str]:
+    """Calculate Global Building Atlas tile IDs needed to cover the bounds.
+    
+    The GBA uses 5x5 degree tiles with naming format: w120_n35_w115_n30
+    representing {WestLon}_{NorthLat}_{EastLon}_{SouthLat}.
+    
+    Args:
+        bounds: Bounding box as (minx, miny, maxx, maxy) in EPSG:4326.
+    
+    Returns:
+        List of full GEE asset paths for the required tiles.
+    """
+    min_x, min_y, max_x, max_y = bounds
+
+    # Align to 5-degree grid
+    start_x = math.floor(min_x / 5.0) * 5
+    start_y = math.floor(min_y / 5.0) * 5
+
+    tile_paths = []
+    base_path = "projects/sat-io/open-datasets/GLOBAL_BUILDING_ATLAS"
+
+    # Iterate through 5x5 degree grid cells
+    curr_x = start_x
+    while curr_x < max_x:
+        curr_y = start_y
+        while curr_y < max_y:
+            # Tile corners
+            tile_w = int(curr_x)
+            tile_s = int(curr_y)
+            tile_e = int(curr_x + 5)
+            tile_n = int(curr_y + 5)
+
+            # Format tile ID
+            part1 = _format_lat_lon_string(tile_w, is_lon=True)
+            part2 = _format_lat_lon_string(tile_n, is_lon=False)
+            part3 = _format_lat_lon_string(tile_e, is_lon=True)
+            part4 = _format_lat_lon_string(tile_s, is_lon=False)
+
+            tile_id = f"{part1}_{part2}_{part3}_{part4}"
+            tile_paths.append(f"{base_path}/{tile_id}")
+
+            curr_y += 5
+        curr_x += 5
+
+    return tile_paths
+
+
+def download_building_height(task_info: TaskInfo) -> DataWithMetadata:
+    """Download building heights from the Global Building Atlas.
+    
+    Uses area-weighted averaging when multiple buildings fall within a single
+    pixel, where larger footprint buildings contribute more to the average.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        DataWithMetadata containing building heights in meters.
+    
+    Raises:
+        ValueError: If no tiles could be loaded for the region.
+    """
+    dataset_name = "building_height"
+    log.info(
+        f"Downloading {dataset_name} data for event_id: {task_info.event_id}"
+    )
+    _ensure_ee_initialized()
+
+    roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
+
+    transformer = Transformer.from_crs(
+        task_info.crs, "EPSG:4326", always_xy=True)
+    minx, miny = transformer.transform(
+        task_info.bounds[0], task_info.bounds[1])
+    maxx, maxy = transformer.transform(
+        task_info.bounds[2], task_info.bounds[3])
+    latlon_bounds = (minx, miny, maxx, maxy)
+
+    # Determine which tiles we need
+    tile_paths = _get_gba_tile_ids(latlon_bounds)
+    log.info(f"Identified GBA tiles: {tile_paths}")
+
+    # Load and merge tile collections
+    collection = None
+    for path in tile_paths:
+        try:
+            col = ee.FeatureCollection(path)
+            if collection is None:
+                collection = col
+            else:
+                collection = collection.merge(col)
+        except Exception as e:
+            log.warning(
+                f"Could not load GBA tile: {path}. Error: {e}"
+            )
+
+    if collection is None:
+        raise ValueError(
+            "Could not load any building atlas tiles for the requested region."
+        )
+
+    # Filter to ROI and valid buildings
+    clipped = collection.filterBounds(roi)
+    clipped = clipped.filter(
+        ee.Filter.And(
+            ee.Filter.neq('height', None),
+            ee.Filter.gt('height', 3.971)
+        )
+    )
+
+    count = clipped.size().getInfo()
+    log.info(f"Buildings in region: {count}")
+
+    # Compute area-weighted average height
+    def add_weighted_height(feature):
+        """Add height*area and area properties for weighted averaging."""
+        height = ee.Number(feature.get('height'))
+        area = feature.geometry().area()
+        return feature.set(
+            'height_x_area', height.multiply(area)
+        ).set('footprint_area', area)
+
+    clipped = clipped.map(add_weighted_height)
+
+    # Sum of (height * area) per pixel
+    height_x_area_raster = clipped.reduceToImage(
+        properties=["height_x_area"],
+        reducer=ee.Reducer.sum()
+    )
+
+    # Sum of area per pixel
+    area_raster = clipped.reduceToImage(
+        properties=["footprint_area"],
+        reducer=ee.Reducer.sum()
+    )
+
+    # Weighted average: sum(height * area) / sum(area)
+    height_raster = height_x_area_raster.divide(
+        area_raster
+    ).unmask(0).rename(dataset_name)
+
+    # Download
+    data_array = _download_processed_image(
+        height_raster, task_info, band_name=dataset_name
+    )
+
+    return DataWithMetadata(
+        name=dataset_name,
+        data=[data_array],
+        timestamps=[task_info.t_start],
+        source=f"Global Building Atlas (Tiles: {len(tile_paths)})",
+        resolution=3,
+        unit="m",
+        note={'aggregation': 'area-weighted average'},
+    )
+
+
+def download_eca(task_info: TaskInfo) -> DataWithMetadata:
+    """Download ESA WorldCover land cover classification.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        DataWithMetadata containing land cover classes (int16).
+    """
+    log.info(f"Downloading ESA WorldCover data for event_id: {task_info.event_id}")
+    data = download_gee_task(
+        task_info,
+        dataset_name="landcover",
+        band="Map",
+        imagecollection="ESA/WorldCover/v200",
+        resample='nearest',
+    )
+    return replace(
+        data,
+        data=[np.around(data.data[0]).astype(np.int16)],
+        resolution=10,
+        unit="class",
+        note=data.note | {'mapping': {
+            0: "No Data",
+            10: "Tree cover",
+            20: "Shrubland",
+            30: "Grassland",
+            40: "Cropland",
+            50: "Built-up",
+            60: "Bare / sparse vegetation",
+            70: "Snow and ice",
+            80: "Permanent water bodies",
+            90: "Herbaceous wetland",
+            95: "Mangroves",
+            100: "Moss and lichen",
+        }}
+    )
+
+
+def download_tc(task_info: TaskInfo) -> DataWithMetadata:
+    """Download Tree Canopy Leaf Area Index (LAI) data.
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+    
+    Returns:
+        DataWithMetadata containing LAI values in m²/m².
+    """
+    log.info(f"Downloading LAI data for event_id: {task_info.event_id}")
+
+    # LAI tile asset paths
+    ASSET_ROOT = 'projects/tc-global-urban/assets/'
+    FILENAMES = [
+        'LAI_Grid_30deg_101_2020-07-02', 'LAI_Grid_30deg_102_2020-07-02', 'LAI_Grid_30deg_103_2020-07-02',
+        'LAI_Grid_30deg_104_2020-07-02', 'LAI_Grid_30deg_105_2020-07-02', 'LAI_Grid_30deg_107_2020-07-02',
+        'LAI_Grid_30deg_108_2020-07-02', 'LAI_Grid_30deg_0_2020-07-02',   'LAI_Grid_30deg_1_2020-07-02',
+        'LAI_Grid_30deg_2_2020-07-02',   'LAI_Grid_30deg_3_2020-07-02',   'LAI_Grid_30deg_4_2020-07-02',
+        'LAI_Grid_30deg_5_2020-07-02',   'LAI_Grid_30deg_6_2020-07-02',   'LAI_Grid_30deg_7_2020-07-02',
+        'LAI_Grid_30deg_8_2020-07-02',   'LAI_Grid_30deg_9_2020-07-02',   'LAI_Grid_30deg_10_2020-07-02',
+        'LAI_Grid_30deg_11NE_2020-07-02', 'LAI_Grid_30deg_11NW_2020-07-02', 'LAI_Grid_30deg_11SE_2020-07-02',
+        'LAI_Grid_30deg_11SW_2020-07-02', 'LAI_Grid_30deg_12_2020-07-02',  'LAI_Grid_30deg_13_2020-07-02',
+        'LAI_Grid_30deg_14_2020-07-02',  'LAI_Grid_30deg_15_2020-07-02',  'LAI_Grid_30deg_16NE_2020-07-02',
+        'LAI_Grid_30deg_16NW_2020-07-02', 'LAI_Grid_30deg_16SE_2020-07-02', 'LAI_Grid_30deg_16SW_2020-07-02',
+        'LAI_Grid_30deg_17_2020-07-02',  'LAI_Grid_30deg_18_2020-07-02',  'LAI_Grid_30deg_19_2020-07-02',
+        'LAI_Grid_30deg_20_2020-07-02',  'LAI_Grid_30deg_21NE_2020-07-02', 'LAI_Grid_30deg_21NW_2020-07-02',
+        'LAI_Grid_30deg_21SE_2020-07-02', 'LAI_Grid_30deg_21SW_2020-07-02', 'LAI_Grid_30deg_22_2020-07-02',
+        'LAI_Grid_30deg_23_2020-07-02',  'LAI_Grid_30deg_24_2020-07-02',  'LAI_Grid_30deg_25_2020-07-02',
+        'LAI_Grid_30deg_26_2020-07-02',  'LAI_Grid_30deg_27_2020-07-02',  'LAI_Grid_30deg_28_2020-07-02',
+        'LAI_Grid_30deg_29_2020-07-02',  'LAI_Grid_30deg_30_2020-07-02',  'LAI_Grid_30deg_31_2020-07-02',
+        'LAI_Grid_30deg_32_2020-07-02',  'LAI_Grid_30deg_33_2020-07-02',  'LAI_Grid_30deg_34_2020-07-02',
+        'LAI_Grid_30deg_35_2020-07-02',  'LAI_Grid_30deg_36_2020-07-02',  'LAI_Grid_30deg_37_2020-07-02',
+        'LAI_Grid_30deg_38_2020-07-02',  'LAI_Grid_30deg_39_2020-07-02',  'LAI_Grid_30deg_40_2020-07-02',
+        'LAI_Grid_30deg_41_2020-07-02',  'LAI_Grid_30deg_42_2020-07-02',  'LAI_Grid_30deg_43_2020-07-02',
+        'LAI_Grid_30deg_44_2020-07-02',  'LAI_Grid_30deg_45_2020-07-02',  'LAI_Grid_30deg_46_2020-07-02',
+        'LAI_Grid_30deg_47_2020-07-02',  'LAI_Grid_30deg_48_2020-07-02',  'LAI_Grid_30deg_49_2020-07-02',
+        'LAI_Grid_30deg_50_2020-07-02',  'LAI_Grid_30deg_51_2020-07-02',  'LAI_Grid_30deg_52_2020-07-02',
+        'LAI_Grid_30deg_53_2020-07-02',  'LAI_Grid_30deg_54_2020-07-02',  'LAI_Grid_30deg_55_2020-07-02',
+        'LAI_Grid_30deg_56_2020-07-02',  'LAI_Grid_30deg_101_2020-07-02', 'LAI_Grid_30deg_102_2020-07-02',
+        'LAI_Grid_30deg_103_2020-07-02', 'LAI_Grid_30deg_104_2020-07-02', 'LAI_Grid_30deg_105_2020-07-02',
+        'LAI_Grid_30deg_107_2020-07-02', 'LAI_Grid_30deg_108_2020-07-02'
+    ]
+
+    def prepare_lai_image(filename: str) -> ee.Image:
+        """Load LAI image and normalize band name."""
+        return ee.Image(ASSET_ROOT + filename).select([0]).rename('lai')
+
+    image_list = [prepare_lai_image(name) for name in FILENAMES]
+
+    # Call Generic Downloader
+    data = download_gee_task(
+        task_info=task_info,
+        dataset_name="lai",
+        imagecollection=image_list,
+        band="lai",
+        resample='bilinear'
+    )
+
+    return replace(
+        data,
+        data=[data_array.astype(np.float32) for data_array in data.data],
+        resolution=10,
+        unit="m2/m2",
+    )
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+def main() -> None:
+    """Main entry point for the Fire Data Loader.
+    
+    Parses command-line arguments and orchestrates the data download and
+    processing pipeline for a single fire event.
+    """
+    parser = argparse.ArgumentParser(
+        description="Fire Data Loader - Download and process wildfire geospatial data",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("event_id", type=str, help="Event ID to process")
+    parser.add_argument(
+        "--resolution", "-r",
+        type=int,
+        default=30,
+        help="Spatial resolution in meters"
+    )
+    parser.add_argument(
+        "--buffer", "-b",
+        type=int,
+        default=100,
+        help="Buffer distance around fire bounds in meters"
+    )
+    parser.add_argument(
+        "--crs", "-c",
+        type=str,
+        default="EPSG:5070",
+        help="Target coordinate reference system"
+    )
+    parser.add_argument(
+        "--output_dir", "-o",
+        type=str,
+        default="output",
+        help="Output directory for saved data"
+    )
+    parser.add_argument(
+        "--interpolation", "-t",
+        type=int,
+        default=0,
+        help="Number of intermediate frames to interpolate between perimeter timesteps"
+    )
+    parser.add_argument(
+        "--herbie_cache_dir",
+        type=str,
+        default=DEFAULT_HERBIE_CACHE_DIR,
+        help="Directory for caching HRRR GRIB files"
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose logging output"
+    )
+
+    args = parser.parse_args()
+
+    # Configure logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    # Load fire information
+    event_id = args.event_id
+    fire_info = get_fire_info(event_id)
+
+    log.info(f"Retrieved fire info for event_id: {event_id}")
+    log.debug(f"Generated fire info: {fire_info}")
+
+    task_info = get_task_info(
+        fire_info, resolution=args.resolution, buffer=args.buffer, crs=args.crs)
+
+    log.debug(f"Generated task info: {task_info}")
+    save_numpy(task_info, DataWithMetadata(
+        name="task_info", data=[task_info]), args.output_dir)
+
+    feds25mtbs = process_feds25mtbs(task_info)
+    log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
+    
+    if args.interpolation > 0:
+        log.info(
+            f"Interpolating burn perimeters with multiplier: {args.interpolation}")
+        feds25mtbs = interpolate_burn_perimeters(
+            feds25mtbs, multiplier=args.interpolation)
+        log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
+    
+    save_numpy(task_info, feds25mtbs, args.output_dir)
+
+    # -------------------------------------------------------------------------
+    # Parallel Downloads (GEE-based datasets)
+    # -------------------------------------------------------------------------
+    # Initialize Earth Engine once before parallel downloads
+    log.info("Initializing Google Earth Engine...")
+    _ensure_ee_initialized()
+    
+    log.info("Starting parallel downloads for GEE datasets...")
+    
+    # Define download tasks: (name, function, args)
+    download_tasks: list[tuple[str, Callable, tuple]] = [
+        ("elevation", download_usgs, (task_info,)),
+        ("landfire", download_landfire, (task_info,)),
+        ("building_height", download_building_height, (task_info,)),
+        ("landcover", download_eca, (task_info,)),
+        ("lai", download_tc, (task_info,)),
+    ]
+    
+    results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
+    max_retries = 3
+    
+    # First pass: parallel downloads
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_name = {
+            executor.submit(func, *func_args): name
+            for name, func, func_args in download_tasks
+        }
+        
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                results[name] = future.result()
+                log.info(f"✓ Completed: {name}")
+            except Exception as e:
+                log.error(f"✗ Failed: {name} - {e}")
+                results[name] = e
+    
+    # Retry failed tasks sequentially
+    failed_tasks = [(name, func, func_args) 
+                    for name, func, func_args in download_tasks 
+                    if isinstance(results.get(name), Exception)]
+    
+    for retry in range(max_retries):
+        if not failed_tasks:
+            break
+        
+        log.info(f"Retrying {len(failed_tasks)} failed task(s) (attempt {retry + 1}/{max_retries})...")
+        still_failed = []
+        
+        for name, func, func_args in failed_tasks:
+            try:
+                results[name] = func(*func_args)
+                log.info(f"✓ Retry succeeded: {name}")
+            except Exception as e:
+                log.error(f"✗ Retry failed: {name} - {e}")
+                results[name] = e
+                still_failed.append((name, func, func_args))
+        
+        failed_tasks = still_failed
+    
+    # Save successful results
+    for name in ["elevation", "building_height", "landcover", "lai"]:
+        if name in results and not isinstance(results[name], Exception):
+            data = results[name]
+            log.debug(f"Downloaded {name} data: {data}")
+            save_numpy(task_info, data, args.output_dir)
+    
+    # Handle landfire (returns list)
+    if "landfire" in results and not isinstance(results["landfire"], Exception):
+        for lf_data in results["landfire"]:
+            log.debug(f"Downloaded LANDFIRE data: {lf_data}")
+            save_numpy(task_info, lf_data, args.output_dir)
+
+    # -------------------------------------------------------------------------
+    # Sequential Download (HRRR - has progress bar)
+    # -------------------------------------------------------------------------
+    hrrr = download_hrrr(task_info, args.herbie_cache_dir)
+
+    for hrrr_data in hrrr:
+        log.debug(f"Downloaded HRRR data: {hrrr_data}")
+        save_numpy(task_info, hrrr_data, args.output_dir)
+        
+        # Write data gap log if there are gaps
+        if hrrr_data.note and hrrr_data.note.get('data_gaps'):
+            write_data_gap_log(task_info, hrrr_data.note['data_gaps'], args.output_dir)
+            break  # Only write once (all variables share the same gaps)
+    
+    # Report any failed downloads
+    failed = [name for name, result in results.items() if isinstance(result, Exception)]
+    if failed:
+        log.warning(f"Some downloads failed: {failed}")
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+def plot(data: np.ndarray, *args, **kwargs) -> None:
+    """Quick visualization of a 2D numpy array using matplotlib.
+    
+    Args:
+        data: 2D array to visualize.
+        *args: Additional positional arguments for imshow.
+        **kwargs: Additional keyword arguments for imshow.
+    """
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(6, 5))
+    plt.imshow(data, cmap='viridis', interpolation='nearest', *args, **kwargs)
+    plt.colorbar(label='Value')
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
