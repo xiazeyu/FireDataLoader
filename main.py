@@ -937,12 +937,21 @@ def download_hrrr(
     if not valid_results:
         raise ValueError("No HRRR data downloaded.")
 
-    # Build output data structures
-    timestamps = [r['timestamp'] for r in valid_results]
-    data_buffer: dict[str, list[np.ndarray]] = {
-        'r2': [r['r2'] for r in valid_results if r['r2'] is not None],
-        'u10': [r['u10'] for r in valid_results if r['u10'] is not None],
-        'v10': [r['v10'] for r in valid_results if r['v10'] is not None],
+    # Build output data structures with per-variable timestamps
+    # Each variable gets its own timestamps list to handle partial data gaps
+    data_buffer: dict[str, dict] = {
+        'r2': {
+            'data': [r['r2'] for r in valid_results if r['r2'] is not None],
+            'timestamps': [r['timestamp'] for r in valid_results if r['r2'] is not None],
+        },
+        'u10': {
+            'data': [r['u10'] for r in valid_results if r['u10'] is not None],
+            'timestamps': [r['timestamp'] for r in valid_results if r['u10'] is not None],
+        },
+        'v10': {
+            'data': [r['v10'] for r in valid_results if r['v10'] is not None],
+            'timestamps': [r['timestamp'] for r in valid_results if r['v10'] is not None],
+        },
     }
 
     n_total = len(timestamps_iter)
@@ -950,18 +959,24 @@ def download_hrrr(
     n_gaps = len(data_gaps)
     
     log.info(f"HRRR Download Summary: {n_success}/{n_total} timestamps successful, {n_gaps} with data gaps")
+    log.info(f"  r2: {len(data_buffer['r2']['data'])} samples, "
+             f"u10: {len(data_buffer['u10']['data'])} samples, "
+             f"v10: {len(data_buffer['v10']['data'])} samples")
 
     payload = []
-    for var_name, data_list in data_buffer.items():
-        payload.append(DataWithMetadata(
-            name=var_name,
-            data=data_list,
-            timestamps=timestamps,
-            source="HRRR via Herbie",
-            resolution=3000,
-            unit="%" if var_name == 'r2' else "m/s",
-            note={'data_gaps': data_gaps} if data_gaps else {},
-        ))
+    for var_name, var_info in data_buffer.items():
+        if var_info['data']:  # Only add if there's data
+            payload.append(DataWithMetadata(
+                name=var_name,
+                data=var_info['data'],
+                timestamps=var_info['timestamps'],
+                source="HRRR via Herbie",
+                resolution=3000,
+                unit="%" if var_name == 'r2' else "m/s",
+                note={'data_gaps': data_gaps} if data_gaps else {},
+            ))
+        else:
+            log.warning(f"No data collected for {var_name}")
 
     return payload
 
@@ -1456,11 +1471,10 @@ def main() -> None:
     for hrrr_data in hrrr:
         log.debug(f"Downloaded HRRR data: {hrrr_data}")
         save_numpy(task_info, hrrr_data, args.output_dir)
-        
-        # Write data gap log if there are gaps
-        if hrrr_data.note and hrrr_data.note.get('data_gaps'):
-            write_data_gap_log(task_info, hrrr_data.note['data_gaps'], args.output_dir)
-            break  # Only write once (all variables share the same gaps)
+    
+    # Write data gap log if there are gaps (after all data saved)
+    if hrrr and hrrr[0].note and hrrr[0].note.get('data_gaps'):
+        write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
     
     # Report any failed downloads
     failed = [name for name, result in results.items() if isinstance(result, Exception)]
