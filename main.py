@@ -743,6 +743,32 @@ def clip_hrrr_to_task(
     return hrrr_data
 
 
+def _calculate_rh_from_t_td(t_celsius: np.ndarray, td_celsius: np.ndarray) -> np.ndarray:
+    """Calculate relative humidity from temperature and dewpoint temperature.
+    
+    Uses the Magnus formula approximation for saturation vapor pressure.
+    
+    Args:
+        t_celsius: Temperature in Celsius.
+        td_celsius: Dewpoint temperature in Celsius.
+    
+    Returns:
+        Relative humidity as percentage (0-100).
+    """
+    # Magnus formula constants (for temperatures -40°C to 50°C)
+    a = 17.625
+    b = 243.04  # °C
+    
+    # Saturation vapor pressure ratio
+    # RH = 100 * exp((a * Td) / (b + Td)) / exp((a * T) / (b + T))
+    rh = 100.0 * np.exp((a * td_celsius) / (b + td_celsius)) / np.exp((a * t_celsius) / (b + t_celsius))
+    
+    # Clamp to valid range
+    rh = np.clip(rh, 0, 100)
+    
+    return rh
+
+
 def download_hrrr(
     task_info: TaskInfo,
     herbie_cache_dir: str = DEFAULT_HERBIE_CACHE_DIR,
@@ -752,6 +778,10 @@ def download_hrrr(
     
     Downloads hourly data from NOAA's High-Resolution Rapid Refresh model
     including relative humidity (r2) and wind components (u10, v10).
+    
+    For older HRRR data where RH:2m is not available, relative humidity is
+    calculated from 2m temperature (TMP) and 2m dewpoint temperature (DPT)
+    using the Magnus formula.
     
     Args:
         task_info: Task configuration with time range and bounds.
@@ -800,15 +830,41 @@ def download_hrrr(
             result: dict = {
                 'timestamp': ts, 
                 'r2': None, 'u10': None, 'v10': None,
-                'r2_error': None, 'wind_error': None
+                'r2_error': None, 'wind_error': None,
+                'r2_source': None,  # Track how RH was obtained
             }
             
+            # Try to get RH directly first
             try:
                 ds_rh = H.xarray(":RH:2 m", remove_grib=False)
                 ds_rh = clip_hrrr_to_task(ds_rh, task_info)
                 result['r2'] = ds_rh.r2.values
-            except Exception as e_rh:
-                result['r2_error'] = str(e_rh)
+                result['r2_source'] = 'direct'
+            except Exception as e_rh_direct:
+                # Fallback: Calculate RH from temperature and dewpoint
+                # This is needed for older HRRR data where RH:2m is not available
+                try:
+                    # Get 2m temperature (in Kelvin)
+                    ds_t2m = H.xarray(":TMP:2 m", remove_grib=False)
+                    ds_t2m = clip_hrrr_to_task(ds_t2m, task_info)
+                    t2m_kelvin = ds_t2m.t2m.values
+                    
+                    # Get 2m dewpoint temperature (in Kelvin)
+                    ds_dpt = H.xarray(":DPT:2 m", remove_grib=False)
+                    ds_dpt = clip_hrrr_to_task(ds_dpt, task_info)
+                    dpt_kelvin = ds_dpt.d2m.values
+                    
+                    # Convert Kelvin to Celsius
+                    t2m_celsius = t2m_kelvin - 273.15
+                    dpt_celsius = dpt_kelvin - 273.15
+                    
+                    # Calculate RH using Magnus formula
+                    result['r2'] = _calculate_rh_from_t_td(t2m_celsius, dpt_celsius)
+                    result['r2_source'] = 'calculated_from_t_dpt'
+                    log.debug(f"Calculated RH from T/DPT for {ts}")
+                    
+                except Exception as e_rh_calc:
+                    result['r2_error'] = f"Direct: {e_rh_direct}; Calculated: {e_rh_calc}"
             
             try:
                 ds_wind = H.xarray(":(?:UGRD|VGRD):10 m", remove_grib=False)
@@ -822,7 +878,7 @@ def download_hrrr(
             
         except Exception as e:
             return {'timestamp': ts, 'r2': None, 'u10': None, 'v10': None, 
-                    'r2_error': str(e), 'wind_error': str(e)}
+                    'r2_error': str(e), 'wind_error': str(e), 'r2_source': None}
 
     # Parallel download with progress bar
     batch_size = 8  # Conservative default, 4-8 recommended
@@ -844,6 +900,7 @@ def download_hrrr(
     results.sort(key=lambda x: x['timestamp'])
     
     # Identify and log data gaps
+    r2_sources = {'direct': 0, 'calculated_from_t_dpt': 0}
     for r in results:
         ts = r['timestamp']
         has_gap = False
@@ -853,6 +910,12 @@ def download_hrrr(
             gap_info['missing'].append('r2')
             gap_info['r2_error'] = r.get('r2_error', 'Unknown error')
             has_gap = True
+        else:
+            # Track source of RH data
+            source = r.get('r2_source', 'unknown')
+            if source in r2_sources:
+                r2_sources[source] += 1
+                
         if r['u10'] is None:
             gap_info['missing'].append('u10')
             gap_info['missing'].append('v10')
@@ -862,6 +925,11 @@ def download_hrrr(
         if has_gap:
             data_gaps.append(gap_info)
             log.warning(f"📊 DATA GAP at {ts}: missing {', '.join(gap_info['missing'])}")
+    
+    # Log RH source statistics
+    if r2_sources['calculated_from_t_dpt'] > 0:
+        log.info(f"📊 RH Data Sources: {r2_sources['direct']} direct, "
+                 f"{r2_sources['calculated_from_t_dpt']} calculated from T/DPT")
     
     # Filter results with at least some data
     valid_results = [r for r in results if r['r2'] is not None or r['u10'] is not None]
