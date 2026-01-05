@@ -110,11 +110,17 @@ output/CA3859812261820171009/
 ### Visualizing Data
 
 ```bash
-# Plot all layers overview
+# Plot all layers overview (saves to file)
 python plot_data.py CA3859812261820171009
+
+# Plot and display interactively
+python plot_data.py CA3859812261820171009 --show
 
 # Plot time series frames (e.g., burn perimeters)
 python plot_data.py CA3859812261820171009 -t burn_perimeters
+
+# Plot time series and display interactively
+python plot_data.py CA3859812261820171009 -t burn_perimeters --show
 ```
 
 ### Loading Data

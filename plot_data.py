@@ -136,7 +136,7 @@ def plot_wui(ax, data, title):
     cbar.ax.tick_params(labelsize=5)  # Smaller font for longer WUI labels
 
 
-def plot_event_data(event_id: str, output_dir: str = 'output'):
+def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = False):
     """Load and plot all data for a fire event."""
     event_path = os.path.join(output_dir, event_id)
     
@@ -279,10 +279,13 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
     plt.savefig(output_fig, dpi=300, bbox_inches='tight')
     print(f"\nSaved overview plot to: {output_fig}")
     
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close()
 
 
-def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output'):
+def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output', show: bool = False):
     """Plot all frames of a time series layer."""
     filepath = os.path.join(output_dir, event_id, f'{layer_name}.npy')
     
@@ -320,7 +323,16 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output')
         axes[idx].axis('off')
     
     plt.tight_layout()
-    plt.show()
+    
+    # Save figure
+    output_fig = os.path.join(output_dir, event_id, f'{event_id}_{layer_name}_timeseries.png')
+    plt.savefig(output_fig, dpi=300, bbox_inches='tight')
+    print(f"\nSaved time series plot to: {output_fig}")
+    
+    if show:
+        plt.show()
+    else:
+        plt.close()
 
 
 def main():
@@ -341,13 +353,18 @@ def main():
         default=None,
         help='Plot time series for specific layer (e.g., burn_perimeters)'
     )
+    parser.add_argument(
+        '-s', '--show',
+        action='store_true',
+        help='Display the plot interactively (default: only save to file)'
+    )
     
     args = parser.parse_args()
     
     if args.timeseries:
-        plot_time_series(args.event_id, args.timeseries, args.output_dir)
+        plot_time_series(args.event_id, args.timeseries, args.output_dir, args.show)
     else:
-        plot_event_data(args.event_id, args.output_dir)
+        plot_event_data(args.event_id, args.output_dir, args.show)
 
 
 if __name__ == '__main__':
