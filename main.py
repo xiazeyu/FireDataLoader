@@ -112,26 +112,143 @@ def get_fire_info(
     )
 
 
+def geometries_are_equal(geom1, geom2, threshold: float = 1e-4) -> bool:
+    """Check if two geometries are equal within a tolerance.
+    
+    Uses symmetric difference to handle floating-point precision issues where
+    geometries are identical but .equals() returns False due to tiny coordinate
+    differences (machine epsilon).
+    
+    Args:
+        geom1: First geometry.
+        geom2: Second geometry.
+        threshold: Maximum symmetric difference ratio to consider equal.
+                   Default 1e-8 filters floating-point noise while keeping real changes.
+    
+    Returns:
+        True if geometries are equal within the threshold.
+    """
+    if geom1 is None or geom2 is None:
+        return geom1 is None and geom2 is None
+    
+    # Fast path: exact equality
+    if geom1.equals(geom2):
+        return True
+    
+    # Check using symmetric difference ratio
+    try:
+        sym_diff = geom1.symmetric_difference(geom2)
+        total_area = max(geom1.area, geom2.area, 1e-10)
+        return sym_diff.area / total_area < threshold
+    except Exception:
+        return False
+
+
+def get_fire_progression_dates(
+    event_id: str,
+    year: int,
+    base_dir: str = 'datasets/FEDS25MTBS'
+) -> tuple[datetime, datetime]:
+    """Find the actual fire progression dates from FEDS25MTBS perimeter data.
+    
+    Analyzes consecutive perimeters to find when the fire actually starts
+    progressing (first change) and when it stops (last change). Uses a
+    tolerance-based comparison to filter out floating-point noise.
+    
+    Args:
+        event_id: Event ID to look up.
+        year: Year of the fire event.
+        base_dir: Base directory containing FEDS25MTBS data.
+    
+    Returns:
+        Tuple of (t_start, t_end) representing the actual fire progression period.
+    
+    Raises:
+        AssertionError: If the GeoPackage file doesn't exist.
+    """
+    data_dir = os.path.join(base_dir, str(year), event_id + '.gpkg')
+    assert os.path.exists(data_dir), f"Error: FEDS25MTBS data not found at {data_dir}"
+    
+    gdf = gpd.read_file(data_dir, layer='perimeter')
+    
+    # Sort by timestamp to ensure correct consecutive comparisons
+    gdf = gdf.sort_values('t').reset_index(drop=True)
+    
+    # Get timestamps and geometries (skip None geometries)
+    timestamps: list[datetime] = []
+    geometries = []
+    
+    for _, row in gdf.iterrows():
+        if row.geometry is not None:
+            timestamps.append(pd.to_datetime(row['t']).to_pydatetime())
+            geometries.append(row.geometry)
+    
+    if not geometries:
+        raise ValueError(f"No valid geometries found for event {event_id}")
+    
+    if len(geometries) < 2:
+        # If there's only one frame, return it as both start and end
+        return timestamps[0], timestamps[0]
+    
+    # Find where consecutive frames differ (using threshold to filter floating-point noise)
+    # changes[i] is True if geometries[i] differs from geometries[i+1]
+    changes: list[bool] = []
+    for i in range(len(geometries) - 1):
+        changes.append(not geometries_are_equal(geometries[i], geometries[i + 1]))
+    
+    # Find first change: t_start is the timestamp of the first frame that differs from the next
+    first_change_idx = 0
+    for i, changed in enumerate(changes):
+        if changed:
+            first_change_idx = i
+            break
+    
+    # Find last change: t_end is the timestamp of the last frame that differs from the previous
+    # This is the frame after the last True in changes
+    last_change_idx = len(geometries) - 1
+    for i in range(len(changes) - 1, -1, -1):
+        if changes[i]:
+            last_change_idx = i + 1  # The frame after the change
+            break
+    
+    log.info(
+        f"Fire progression dates: {timestamps[first_change_idx]} to {timestamps[last_change_idx]} "
+        f"(frames {first_change_idx} to {last_change_idx} of {len(geometries)})"
+    )
+    
+    return timestamps[first_change_idx], timestamps[last_change_idx]
+
+
 def get_task_info(
     fire_info: FireInfo,
     resolution: int = 30,
     buffer: int = 100,
     crs: str = "EPSG:5070",
+    feds25mtbs_base_dir: str = 'datasets/FEDS25MTBS',
 ) -> TaskInfo:
     """Create a processing task configuration from fire event information.
     
     Transforms the fire bounds to the target CRS, applies a buffer, and
-    calculates the output grid dimensions.
+    calculates the output grid dimensions. The fire progression dates (t_start
+    and t_end) are determined from the FEDS25MTBS perimeter data by finding
+    when the fire perimeter actually changes.
     
     Args:
         fire_info: Fire event information.
         resolution: Target spatial resolution in meters.
         buffer: Buffer distance to add around the fire bounds in meters.
         crs: Target coordinate reference system.
+        feds25mtbs_base_dir: Base directory containing FEDS25MTBS data.
     
     Returns:
         TaskInfo object defining the processing parameters.
     """
+    # Get actual fire progression dates from perimeter data
+    t_start, t_end = get_fire_progression_dates(
+        fire_info.event_id,
+        fire_info.year,
+        feds25mtbs_base_dir
+    )
 
     minx, miny, maxx, maxy = fire_info.bounds
     bbox_poly = box(minx, miny, maxx, maxy)
@@ -156,8 +273,8 @@ def get_task_info(
         event_id=fire_info.event_id,
         name=fire_info.name,
         year=fire_info.year,
-        t_start=fire_info.t_start,
-        t_end=fire_info.t_end,
+        t_start=t_start,
+        t_end=t_end,
         resolution=resolution,
         bounds=target_bounds,
         shape=(height, width),
@@ -218,7 +335,9 @@ def process_feds25mtbs(
     """Process FEDS25MTBS fire perimeter data into rasterized time series.
     
     Reads the GeoPackage file for the fire event and rasterizes each timestep's
-    perimeter polygon to match the task grid specification.
+    perimeter polygon to match the task grid specification. Only includes frames
+    within the task_info time range (t_start to t_end) where the perimeter
+    actually changed from the previous frame.
     
     Args:
         task_info: Task configuration with event details and grid parameters.
@@ -239,9 +358,12 @@ def process_feds25mtbs(
         data_dir), f"Error: FEDS25MTBS data not found at {data_dir}"
 
     gdf = gpd.read_file(data_dir, layer='perimeter')
+    
+    # Sort by timestamp to ensure correct consecutive comparisons
+    gdf = gdf.sort_values('t').reset_index(drop=True)
 
-    data_list = []
-    timestamps = []
+    all_data = []
+    all_timestamps = []
 
     for _, row in gdf.iterrows():
         timestamp = pd.to_datetime(row['t'])
@@ -252,15 +374,41 @@ def process_feds25mtbs(
             continue
 
         if geom.geom_type == 'MultiPolygon':
-            data_list.append(geom)
+            all_data.append(geom)
         elif geom.geom_type == 'Polygon':
-            data_list.append(MultiPolygon([geom]))
+            all_data.append(MultiPolygon([geom]))
         else:
             log.warning(
                 f"Unexpected geometry type: {geom.geom_type} for event_id: {task_info.event_id}")
             continue
 
-        timestamps.append(timestamp)
+        all_timestamps.append(timestamp)
+
+    # Filter to only include frames within t_start and t_end
+    filtered_data = []
+    filtered_timestamps = []
+    for ts, geom in zip(all_timestamps, all_data):
+        if task_info.t_start <= ts <= task_info.t_end:
+            filtered_timestamps.append(ts)
+            filtered_data.append(geom)
+    
+    log.info(
+        f"Filtered frames: {len(filtered_data)} of {len(all_data)} "
+        f"(t_start={task_info.t_start}, t_end={task_info.t_end})"
+    )
+
+    # Filter to only include frames where perimeter is different from last imported
+    # Uses threshold-based comparison to filter floating-point noise
+    data_list = []
+    timestamps = []
+    last_imported_geom = None
+    for ts, geom in zip(filtered_timestamps, filtered_data):
+        if last_imported_geom is None or not geometries_are_equal(geom, last_imported_geom):
+            data_list.append(geom)
+            timestamps.append(ts)
+            last_imported_geom = geom  # Only update when we actually import
+    
+    log.info(f"Unique frames imported: {len(data_list)} of {len(filtered_data)}")
 
     # Calculate grid dimensions from task bounds
     t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
@@ -1760,7 +1908,15 @@ def main() -> None:
     log.debug(f"Generated task info: {task_info}")
     save_numpy(task_info, DataWithMetadata(
         name="task_info", data=[task_info]), args.output_dir)
-
+    
+    log.info(f"Processing FEDS25MTBS data for event_id: {task_info.event_id}")
+    log.info(f"FEDS25MTBS data start date: {task_info.t_start}")
+    log.info(f"FEDS25MTBS data end date: {task_info.t_end}")
+    log.info(f"FEDS25MTBS data resolution: {task_info.resolution}")
+    log.info(f"FEDS25MTBS data shape: {task_info.shape}")
+    log.info(f"FEDS25MTBS data crs: {task_info.crs}")
+    log.info(f"FEDS25MTBS data bounds: {task_info.bounds}")
+    
     feds25mtbs = process_feds25mtbs(task_info)
     log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
     
