@@ -172,7 +172,10 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
     
     # Skip task_info for plotting
     data_files = [f for f in npy_files if f != 'task_info.npy']
-    n_plots = len(data_files)
+    
+    # Count extra plots needed for burn_perimeters (first + last timestep)
+    extra_plots = 1 if 'burn_perimeters.npy' in data_files else 0
+    n_plots = len(data_files) + extra_plots
     
     if n_plots == 0:
         print("No plottable data files found.")
@@ -191,7 +194,8 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
     else:
         axes = axes.flatten() if n_plots > 1 else [axes]
     
-    for idx, filename in enumerate(data_files):
+    plot_idx = 0  # Track current plot index separately
+    for filename in data_files:
         filepath = os.path.join(event_path, filename)
         data_obj = load_numpy(filepath)
         
@@ -200,50 +204,68 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
         
         # Get the first frame (or only frame for static data)
         if data_obj.data and len(data_obj.data) > 0:
-            plot_data = data_obj.data[0]
-            
-            # Handle non-array data (like task_info)
-            if not isinstance(plot_data, np.ndarray):
-                axes[idx].text(0.5, 0.5, f'{name}\n(non-array data)', 
-                              ha='center', va='center', transform=axes[idx].transAxes)
-                axes[idx].axis('off')
-                continue
-            
-            # Build title with metadata
-            title = config['label']
-            if data_obj.unit:
-                title = f"{name} ({data_obj.unit})"
-            if data_obj.resolution:
-                title += f" @ {data_obj.resolution}m"
-            
-            # For time series data, show first frame info
-            if len(data_obj.data) > 1:
-                title += f"\n[Frame 1/{len(data_obj.data)}]"
-            
-            # Handle RGB images (satellite data) - 3D array with shape (H, W, 3)
-            if plot_data.ndim == 3 and plot_data.shape[2] == 3:
-                im = axes[idx].imshow(plot_data)
-                axes[idx].set_title(title, fontsize=10)
-                axes[idx].axis('off')
-                # Add invisible colorbar to maintain alignment with other plots
-                cbar = plt.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
-                cbar.ax.set_visible(False)
-            # Handle landcover with discrete legend
-            elif name == 'landcover':
-                plot_landcover(axes[idx], plot_data, title)
-            # Handle WUI with discrete legend
-            elif name == 'wui':
-                plot_wui(axes[idx], plot_data, title)
+            # For burn_perimeters, plot both first and last timestep
+            if name == 'burn_perimeters' and len(data_obj.data) > 1:
+                frames_to_plot = [
+                    (0, data_obj.data[0], "First"),
+                    (-1, data_obj.data[-1], "Last")
+                ]
             else:
-                plot_single_layer(axes[idx], plot_data, title, cmap=config['cmap'])
+                frames_to_plot = [(0, data_obj.data[0], None)]
             
-            # Print stats
-            print(f"  {name}: shape={plot_data.shape}, "
-                  f"min={plot_data.min():.2f}, max={plot_data.max():.2f}, "
-                  f"frames={len(data_obj.data)}")
+            for frame_idx, plot_data, frame_label in frames_to_plot:
+                # Handle non-array data (like task_info)
+                if not isinstance(plot_data, np.ndarray):
+                    axes[plot_idx].text(0.5, 0.5, f'{name}\n(non-array data)', 
+                                  ha='center', va='center', transform=axes[plot_idx].transAxes)
+                    axes[plot_idx].axis('off')
+                    plot_idx += 1
+                    continue
+                
+                # Build title with metadata
+                title = config['label']
+                if data_obj.unit:
+                    title = f"{name} ({data_obj.unit})"
+                if data_obj.resolution:
+                    title += f" @ {data_obj.resolution}m"
+                
+                # For time series data, show frame info
+                if len(data_obj.data) > 1:
+                    if frame_label:
+                        actual_frame_num = frame_idx + 1 if frame_idx >= 0 else len(data_obj.data)
+                        title += f"\n[{frame_label} - Frame {actual_frame_num}/{len(data_obj.data)}]"
+                    else:
+                        title += f"\n[Frame 1/{len(data_obj.data)}]"
+                
+                # Handle RGB images (satellite data) - 3D array with shape (H, W, 3)
+                if plot_data.ndim == 3 and plot_data.shape[2] == 3:
+                    im = axes[plot_idx].imshow(plot_data)
+                    axes[plot_idx].set_title(title, fontsize=10)
+                    axes[plot_idx].axis('off')
+                    # Add invisible colorbar to maintain alignment with other plots
+                    cbar = plt.colorbar(im, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+                    cbar.ax.set_visible(False)
+                # Handle landcover with discrete legend
+                elif name == 'landcover':
+                    plot_landcover(axes[plot_idx], plot_data, title)
+                # Handle WUI with discrete legend
+                elif name == 'wui':
+                    plot_wui(axes[plot_idx], plot_data, title)
+                else:
+                    plot_single_layer(axes[plot_idx], plot_data, title, cmap=config['cmap'])
+                
+                # Print stats (only once per data file)
+                if frame_label is None or frame_label == "First":
+                    print(f"  {name}: shape={plot_data.shape}, "
+                          f"min={plot_data.min():.2f}, max={plot_data.max():.2f}, "
+                          f"frames={len(data_obj.data)}")
+                
+                plot_idx += 1
         else:
-            axes[idx].text(0.5, 0.5, f'{name}\n(no data)', 
-                          ha='center', va='center', transform=axes[idx].transAxes)
+            axes[plot_idx].text(0.5, 0.5, f'{name}\n(no data)', 
+                          ha='center', va='center', transform=axes[plot_idx].transAxes)
+            axes[plot_idx].axis('off')
+            plot_idx += 1
             axes[idx].axis('off')
     
     # Hide unused subplots
