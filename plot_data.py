@@ -32,6 +32,19 @@ LANDCOVER_CLASSES = {
     100: ('Moss and Lichen', '#fae6a0'),      # Beige
 }
 
+# Global WUI (Wildland-Urban Interface) classes
+# From: Schug et al. 2023, https://doi.org/10.1038/s41586-023-06320-0
+WUI_CLASSES = {
+    1: ('Forest/Shrub/Wetland Intermix WUI', '#d62728'),   # Red - high risk WUI
+    2: ('Forest/Shrub/Wetland Interface WUI', '#ff7f0e'),  # Orange - interface WUI
+    3: ('Grassland Intermix WUI', '#e377c2'),              # Pink - grassland intermix
+    4: ('Grassland Interface WUI', '#f7b6d2'),             # Light pink - grassland interface
+    5: ('Non-WUI: Forest/Shrub/Wetland', '#2ca02c'),       # Green - natural forest
+    6: ('Non-WUI: Grassland', '#98df8a'),                  # Light green - grassland
+    7: ('Non-WUI: Urban', '#7f7f7f'),                      # Gray - urban
+    8: ('Non-WUI: Other', '#c7c7c7'),                      # Light gray - other
+}
+
 
 def plot_single_layer(ax, data, title, cmap='viridis', vmin=None, vmax=None):
     """Plot a single 2D data layer."""
@@ -82,6 +95,47 @@ def plot_landcover(ax, data, title):
     cbar.ax.tick_params(labelsize=6)
 
 
+def plot_wui(ax, data, title):
+    """Plot WUI (Wildland-Urban Interface) data with discrete legend.
+    
+    Uses custom color scheme to highlight WUI risk categories:
+    - Red/Orange tones for WUI areas (intermix and interface)
+    - Green tones for non-WUI vegetated areas
+    - Gray tones for urban and other non-WUI areas
+    """
+    # Find unique values present in data
+    unique_values = np.unique(data)
+    unique_values = unique_values[unique_values != 0]  # Exclude NoData (0)
+    
+    # Filter to only known WUI classes (1-8)
+    present_classes = [v for v in unique_values if v in WUI_CLASSES]
+    
+    if not present_classes:
+        ax.imshow(data, cmap='tab10', interpolation='nearest')
+        ax.set_title(title, fontsize=10)
+        ax.axis('off')
+        return
+    
+    # Create colormap for present classes
+    colors = [WUI_CLASSES[v][1] for v in present_classes]
+    cmap = ListedColormap(colors)
+    
+    # Create boundaries for discrete colormap
+    bounds = present_classes + [present_classes[-1] + 1]
+    norm = BoundaryNorm(bounds, cmap.N)
+    
+    # Plot
+    im = ax.imshow(data, cmap=cmap, norm=norm, interpolation='nearest')
+    ax.set_title(title, fontsize=10)
+    ax.axis('off')
+    
+    # Create a colorbar with class labels
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_ticks(present_classes)
+    cbar.set_ticklabels([WUI_CLASSES[v][0] for v in present_classes])
+    cbar.ax.tick_params(labelsize=5)  # Smaller font for longer WUI labels
+
+
 def plot_event_data(event_id: str, output_dir: str = 'output'):
     """Load and plot all data for a fire event."""
     event_path = os.path.join(output_dir, event_id)
@@ -113,6 +167,7 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
         'lai': {'cmap': 'YlGn', 'label': 'LAI (m²/m²)'},
         'satellite': {'cmap': None, 'label': 'Satellite (RGB)'},
         'hillshade': {'cmap': 'gray', 'label': 'Hillshade'},
+        'wui': {'cmap': 'tab10', 'label': 'Wildland-Urban Interface'},
     }
     
     # Skip task_info for plotting
@@ -176,6 +231,9 @@ def plot_event_data(event_id: str, output_dir: str = 'output'):
             # Handle landcover with discrete legend
             elif name == 'landcover':
                 plot_landcover(axes[idx], plot_data, title)
+            # Handle WUI with discrete legend
+            elif name == 'wui':
+                plot_wui(axes[idx], plot_data, title)
             else:
                 plot_single_layer(axes[idx], plot_data, title, cmap=config['cmap'])
             

@@ -1419,6 +1419,213 @@ def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
 
 
 # =============================================================================
+# Global WUI (Wildland-Urban Interface) Functions
+# =============================================================================
+
+# Global WUI class definitions
+GLOBAL_WUI_CLASSES = {
+    1: "Forest/Shrub/Wetland Intermix WUI",
+    2: "Forest/Shrub/Wetland Interface WUI",
+    3: "Grassland Intermix WUI",
+    4: "Grassland Interface WUI",
+    5: "Non-WUI: Forest/Shrub/Wetland",
+    6: "Non-WUI: Grassland",
+    7: "Non-WUI: Urban",
+    8: "Non-WUI: Other",
+}
+
+
+def _get_equi7_tile_params() -> dict:
+    """Get EQUI7 grid parameters for North America tile system.
+    
+    The Global WUI data uses the EQUI7 Azimuthal Equidistant projection
+    with 100km x 100km tiles.
+    
+    Returns:
+        Dictionary with projection and tile parameters.
+    """
+    return {
+        'crs': 'PROJCS["Azimuthal_Equidistant",GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Azimuthal_Equidistant"],PARAMETER["false_easting",8264722.17686],PARAMETER["false_northing",4867518.35323],PARAMETER["longitude_of_center",-97.5],PARAMETER["latitude_of_center",52.0],UNIT["Meter",1.0]]',
+        'tile_size': 100000,  # 100km tiles
+        'origin_x': 0,
+        'origin_y': 9900000,
+    }
+
+
+def _get_equi7_tiles_for_bounds(
+    bounds: tuple[float, float, float, float],
+    source_crs: str,
+) -> list[str]:
+    """Calculate EQUI7 tile IDs needed to cover the given bounds.
+    
+    Args:
+        bounds: Bounding box (minx, miny, maxx, maxy) in source_crs.
+        source_crs: CRS of the input bounds.
+    
+    Returns:
+        List of tile IDs in format 'X0065_Y0040'.
+    """
+    equi7_params = _get_equi7_tile_params()
+    
+    # Transform bounds to EQUI7 projection
+    transformer = Transformer.from_crs(source_crs, equi7_params['crs'], always_xy=True)
+    
+    # Transform all corners to handle projection distortion
+    minx, miny, maxx, maxy = bounds
+    corners = [
+        (minx, miny), (minx, maxy),
+        (maxx, miny), (maxx, maxy),
+    ]
+    
+    transformed_x = []
+    transformed_y = []
+    for x, y in corners:
+        tx, ty = transformer.transform(x, y)
+        transformed_x.append(tx)
+        transformed_y.append(ty)
+    
+    # Get bounding box in EQUI7 coordinates
+    equi7_minx = min(transformed_x)
+    equi7_miny = min(transformed_y)
+    equi7_maxx = max(transformed_x)
+    equi7_maxy = max(transformed_y)
+    
+    # Calculate tile indices
+    tile_size = equi7_params['tile_size']
+    origin_x = equi7_params['origin_x']
+    origin_y = equi7_params['origin_y']
+    
+    # Tile index calculation: tile_x = floor(x / tile_size), tile_y = floor((origin_y - y) / tile_size)
+    # Note: Y increases downward in the tile naming scheme
+    min_tile_x = int(math.floor(equi7_minx / tile_size))
+    max_tile_x = int(math.floor(equi7_maxx / tile_size))
+    min_tile_y = int(math.floor((origin_y - equi7_maxy) / tile_size))
+    max_tile_y = int(math.floor((origin_y - equi7_miny) / tile_size))
+    
+    tiles = []
+    for tx in range(min_tile_x, max_tile_x + 1):
+        for ty in range(min_tile_y, max_tile_y + 1):
+            tile_id = f"X{tx:04d}_Y{ty:04d}"
+            tiles.append(tile_id)
+    
+    return tiles
+
+
+def download_globalwui(
+    task_info: TaskInfo,
+    base_dir: str = 'datasets/globalwui'
+) -> DataWithMetadata:
+    """Download Global Wildland-Urban Interface (WUI) data.
+    
+    The Global WUI dataset maps the interface between human settlements and
+    wildland vegetation at 10m resolution. Data is organized in EQUI7 tiles.
+    
+    Reference:
+        Schug, F. et al. (2023). The global wildland–urban interface.
+        Nature. https://doi.org/10.1038/s41586-023-06320-0
+    
+    Args:
+        task_info: Task configuration with bounds and resolution.
+        base_dir: Base directory containing the Global WUI data tiles.
+    
+    Returns:
+        DataWithMetadata containing WUI class values (uint8, 1-8).
+    
+    Raises:
+        FileNotFoundError: If required tiles are not found.
+    """
+    log.info(f"Processing Global WUI data for event_id: {task_info.event_id}")
+    
+    # Get tiles that intersect with task bounds
+    tiles_needed = _get_equi7_tiles_for_bounds(task_info.bounds, task_info.crs)
+    log.info(f"Required EQUI7 tiles: {tiles_needed}")
+    
+    # Load and merge tiles using rioxarray
+    tile_datasets = []
+    missing_tiles = []
+    
+    for tile_id in tiles_needed:
+        tile_path = os.path.join(base_dir, tile_id, 'WUI.tif')
+        if os.path.exists(tile_path):
+            try:
+                ds = rioxarray.open_rasterio(tile_path)
+                tile_datasets.append(ds)
+                log.debug(f"Loaded tile: {tile_id}")
+            except Exception as e:
+                log.warning(f"Error loading tile {tile_id}: {e}")
+                missing_tiles.append(tile_id)
+        else:
+            log.warning(f"Tile not found: {tile_path}")
+            missing_tiles.append(tile_id)
+    
+    if not tile_datasets:
+        raise FileNotFoundError(
+            f"No Global WUI tiles found for region. "
+            f"Expected tiles: {tiles_needed}. "
+            f"Please download the required tiles from the Global WUI dataset."
+        )
+    
+    if missing_tiles:
+        log.warning(f"Missing tiles (may be outside WUI coverage): {missing_tiles}")
+    
+    # Merge tiles if multiple
+    if len(tile_datasets) == 1:
+        merged = tile_datasets[0]
+    else:
+        from rioxarray.merge import merge_arrays
+        merged = merge_arrays(tile_datasets)
+    
+    # Reproject to task CRS and clip to bounds
+    t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
+    
+    # Create the target transform
+    target_transform = from_origin(
+        t_minx, t_maxy,
+        task_info.resolution, task_info.resolution
+    )
+    
+    # Reproject and resample
+    reprojected = merged.rio.reproject(
+        dst_crs=task_info.crs,
+        shape=task_info.shape,
+        transform=target_transform,
+        resampling=Resampling.nearest,  # Use nearest neighbor for categorical data
+    )
+    
+    # Extract data array
+    data_array = reprojected.values
+    
+    # Handle band dimension if present
+    if data_array.ndim == 3:
+        data_array = data_array[0]  # Take first band
+    
+    assert data_array.shape == task_info.shape, (
+        f"Shape mismatch: got {data_array.shape}, expected {task_info.shape}"
+    )
+    
+    # Convert to uint8
+    data_array = data_array.astype(np.uint8)
+    
+    log.info(f"✓ Processed Global WUI data: {data_array.shape}, "
+             f"unique classes: {np.unique(data_array).tolist()}")
+    
+    return DataWithMetadata(
+        name="wui",
+        data=[data_array],
+        timestamps=[task_info.t_start],
+        source="Global WUI; Schug et al. 2023; https://doi.org/10.1038/s41586-023-06320-0",
+        resolution=10,
+        unit="class",
+        note={
+            'mapping': GLOBAL_WUI_CLASSES,
+            'description': 'Wildland-Urban Interface classification',
+            'temporal_coverage': 'ca. 2020',
+            'missing_tiles': missing_tiles if missing_tiles else None,
+        }
+    )
+
+
+# =============================================================================
 # Hillshade (Terrain Visualization) Functions
 # =============================================================================
 
@@ -1584,6 +1791,7 @@ def main() -> None:
         ("lai", download_tc, (task_info,)),
         ("satellite", download_satellite, (task_info,)),
         ("hillshade", download_hillshade, (task_info,)),
+        ("wui", download_globalwui, (task_info,)),
     ]
     
     results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
@@ -1629,7 +1837,7 @@ def main() -> None:
         failed_tasks = still_failed
     
     # Save successful results
-    for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade"]:
+    for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade", "wui"]:
         if name in results and not isinstance(results[name], Exception):
             data = results[name]
             log.debug(f"Downloaded {name} data: {data}")
