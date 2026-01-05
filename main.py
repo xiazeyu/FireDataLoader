@@ -771,6 +771,10 @@ def _calculate_rh_from_t_td(t_celsius: np.ndarray, td_celsius: np.ndarray) -> np
     return rh
 
 
+# HRRR data availability: AWS archive starts from 2014-09-30
+HRRR_ARCHIVE_START_DATE = datetime(2014, 9, 30)
+
+
 def download_hrrr(
     task_info: TaskInfo,
     herbie_cache_dir: str = DEFAULT_HERBIE_CACHE_DIR,
@@ -805,9 +809,29 @@ def download_hrrr(
     """
     log.info(f"Downloading HRRR data for event_id: {task_info.event_id}")
 
+    # Check if the fire event is within HRRR data availability
+    if task_info.t_end < HRRR_ARCHIVE_START_DATE:
+        log.warning(
+            f"⚠️ Fire event {task_info.event_id} occurred before HRRR archive start date. "
+            f"Event dates: {task_info.t_start.date()} to {task_info.t_end.date()}, "
+            f"HRRR archive starts: {HRRR_ARCHIVE_START_DATE.date()}. "
+            f"Skipping HRRR download - no data available for this period."
+        )
+        return []  # Return empty list instead of raising error
+    
+    if task_info.t_start < HRRR_ARCHIVE_START_DATE:
+        log.warning(
+            f"⚠️ Fire event {task_info.event_id} starts before HRRR archive availability. "
+            f"Adjusting start time from {task_info.t_start} to {HRRR_ARCHIVE_START_DATE}. "
+            f"Some early data will be missing."
+        )
+        effective_t_start = HRRR_ARCHIVE_START_DATE
+    else:
+        effective_t_start = task_info.t_start
+
     # Build list of timestamps to download
     timestamps_iter: list[datetime] = []
-    current_time = task_info.t_start
+    current_time = effective_t_start
     while current_time <= task_info.t_end:
         timestamps_iter.append(current_time)
         current_time += timedelta(hours=delta_hour)
@@ -1622,13 +1646,16 @@ def main() -> None:
     # -------------------------------------------------------------------------
     hrrr = download_hrrr(task_info, args.herbie_cache_dir)
 
-    for hrrr_data in hrrr:
-        log.debug(f"Downloaded HRRR data: {hrrr_data}")
-        save_numpy(task_info, hrrr_data, args.output_dir)
-    
-    # Write data gap log if there are gaps (after all data saved)
-    if hrrr and hrrr[0].note and hrrr[0].note.get('data_gaps'):
-        write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
+    if hrrr:
+        for hrrr_data in hrrr:
+            log.debug(f"Downloaded HRRR data: {hrrr_data}")
+            save_numpy(task_info, hrrr_data, args.output_dir)
+        
+        # Write data gap log if there are gaps (after all data saved)
+        if hrrr[0].note and hrrr[0].note.get('data_gaps'):
+            write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
+    else:
+        log.warning(f"⚠️ No HRRR data available for event {task_info.event_id} - HRRR variables (r2, u10, v10) will not be saved.")
     
     # Report any failed downloads
     failed = [name for name, result in results.items() if isinstance(result, Exception)]
