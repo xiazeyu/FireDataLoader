@@ -103,6 +103,7 @@ class ProcessingArgs:
         interpolation: Number of intermediate frames to interpolate.
         herbie_cache_dir: Directory for caching HRRR GRIB files.
         verbose: Enable verbose logging output.
+        only: Optional list of feature names to process (None = all features).
     """
     resolution: int = 30
     buffer: int = 100
@@ -111,3 +112,4 @@ class ProcessingArgs:
     interpolation: int = 0
     herbie_cache_dir: str = "./datasets/herbie"
     verbose: bool = False
+    only: Optional[list[str]] = None

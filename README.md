@@ -88,7 +88,25 @@ python main.py --batch CA123,CA456,CA789 [options]
 | `-o, --output_dir` | Output directory | output |
 | `-t, --interpolation` | Intermediate frames between timesteps | 0 |
 | `--herbie_cache_dir` | HRRR cache directory | datasets/herbie |
+| `--only` | Only process specific feature(s), comma-separated | all |
 | `-v, --verbose` | Enable verbose logging | False |
+
+#### Available Features for `--only`
+
+| Feature | Description |
+|---------|-------------|
+| `burn_perimeters` | Fire perimeter time series from FEDS25MTBS |
+| `frp_day` | Daytime Fire Radiative Power |
+| `frp_night` | Nighttime Fire Radiative Power |
+| `elevation` | USGS 3DEP elevation |
+| `landfire` | LANDFIRE CBD and Canopy Cover |
+| `building_height` | Global Building Atlas heights |
+| `landcover` | ESA WorldCover classification |
+| `lai` | Leaf Area Index |
+| `satellite` | RGB satellite imagery (NAIP/Sentinel-2) |
+| `hillshade` | Terrain hillshade visualization |
+| `wui` | Wildland-Urban Interface classification |
+| `hrrr` | Weather data (humidity, wind) |
 
 ### Examples
 
@@ -103,10 +121,19 @@ python main.py CA3859812261820171009 -t 3
 python main.py CA3859812261820171009 -o ./my_output
 
 # Batch process from file with 4 workers
-python main.py --batch fire_events.txt -w 4 -o results/
+python main.py --batch events.txt -w 4 -o results/
 
 # Batch process specific events
 python main.py --batch CA123,CA456,CA789 --workers 3
+
+# Process only a single feature (for quick debugging)
+python main.py CA3859812261820171009 --only frp_day
+
+# Process multiple specific features
+python main.py CA3859812261820171009 --only frp_day,frp_night,elevation
+
+# Regenerate only weather data
+python main.py CA3859812261820171009 --only hrrr
 ```
 
 The batch summary is saved to `output/batch_summary.json`.

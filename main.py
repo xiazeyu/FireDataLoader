@@ -2436,6 +2436,13 @@ def process_single_fire(
     """
     results_status: dict[str, Any] = {}
     
+    # Helper function to check if a feature should be processed
+    def should_process(feature_name: str) -> bool:
+        """Check if a feature should be processed based on --only filter."""
+        if args.only is None:
+            return True  # Process all features if no filter specified
+        return feature_name in args.only
+    
     try:
         # Load fire information
         fire_info = get_fire_info(event_id)
@@ -2453,36 +2460,49 @@ def process_single_fire(
         log.info(f"  Date range: {task_info.t_start} to {task_info.t_end}")
         log.info(f"  Resolution: {task_info.resolution}m, Shape: {task_info.shape}")
         log.info(f"  CRS: {task_info.crs}, Bounds: {task_info.bounds}")
+        if args.only:
+            log.info(f"  Only processing: {args.only}")
         
-        # Process FEDS25MTBS
-        feds25mtbs = process_feds25mtbs(task_info)
-        log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
+        # Process FEDS25MTBS (always needed for FRP, so process if any FRP is requested)
+        needs_perimeters = should_process("burn_perimeters") or should_process("frp_day") or should_process("frp_night")
+        feds25mtbs = None
         
-        if args.interpolation > 0:
-            log.info(f"Interpolating burn perimeters with multiplier: {args.interpolation}")
-            feds25mtbs = interpolate_burn_perimeters(feds25mtbs, multiplier=args.interpolation)
-            log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
-        
-        save_numpy(task_info, feds25mtbs, args.output_dir)
-        results_status["burn_perimeters"] = True
+        if needs_perimeters:
+            feds25mtbs = process_feds25mtbs(task_info)
+            log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
+            
+            if args.interpolation > 0:
+                log.info(f"Interpolating burn perimeters with multiplier: {args.interpolation}")
+                feds25mtbs = interpolate_burn_perimeters(feds25mtbs, multiplier=args.interpolation)
+                log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
+            
+            if should_process("burn_perimeters"):
+                save_numpy(task_info, feds25mtbs, args.output_dir)
+                results_status["burn_perimeters"] = True
+        else:
+            log.info("⏭️ Skipping burn_perimeters (not in --only)")
 
         # Process FRP
-        log.info("Processing FRP (Fire Radiative Power) data...")
+        if should_process("frp_day"):
+            log.info("Processing FRP (Fire Radiative Power) day data...")
+            frp_day = process_frp_day(task_info, feds25mtbs)
+            save_numpy(task_info, frp_day, args.output_dir)
+            log.info(f"✓ Saved frp_day.npy ({len(frp_day.data)} time steps)")
+            results_status["frp_day"] = True
+        else:
+            log.info("⏭️ Skipping frp_day (not in --only)")
         
-        frp_day = process_frp_day(task_info, feds25mtbs)
-        save_numpy(task_info, frp_day, args.output_dir)
-        log.info(f"✓ Saved frp_day.npy ({len(frp_day.data)} time steps)")
-        results_status["frp_day"] = True
-        
-        frp_night = process_frp_night(task_info, feds25mtbs)
-        save_numpy(task_info, frp_night, args.output_dir)
-        log.info(f"✓ Saved frp_night.npy ({len(frp_night.data)} time steps)")
-        results_status["frp_night"] = True
+        if should_process("frp_night"):
+            log.info("Processing FRP (Fire Radiative Power) night data...")
+            frp_night = process_frp_night(task_info, feds25mtbs)
+            save_numpy(task_info, frp_night, args.output_dir)
+            log.info(f"✓ Saved frp_night.npy ({len(frp_night.data)} time steps)")
+            results_status["frp_night"] = True
+        else:
+            log.info("⏭️ Skipping frp_night (not in --only)")
 
         # Parallel Downloads (GEE-based datasets)
-        log.info("Starting parallel downloads for GEE datasets...")
-        
-        download_tasks: list[tuple[str, Callable, tuple]] = [
+        all_gee_tasks: list[tuple[str, Callable, tuple]] = [
             ("elevation", download_usgs, (task_info,)),
             ("landfire", download_landfire, (task_info,)),
             ("building_height", download_building_height, (task_info,)),
@@ -2493,80 +2513,93 @@ def process_single_fire(
             ("wui", download_globalwui, (task_info,)),
         ]
         
-        results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
-        max_retries = 3
+        # Filter to only requested features
+        download_tasks = [(name, func, func_args) 
+                          for name, func, func_args in all_gee_tasks 
+                          if should_process(name)]
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_name = {
-                executor.submit(func, *func_args): name
-                for name, func, func_args in download_tasks
-            }
+        if download_tasks:
+            log.info(f"Starting parallel downloads for GEE datasets: {[t[0] for t in download_tasks]}")
             
-            for future in as_completed(future_to_name):
-                name = future_to_name[future]
-                try:
-                    results[name] = future.result()
-                    log.info(f"✓ Completed: {name}")
-                except Exception as e:
-                    log.error(f"✗ Failed: {name} - {e}")
-                    results[name] = e
-        
-        # Retry failed tasks
-        failed_tasks = [(name, func, func_args) 
-                        for name, func, func_args in download_tasks 
-                        if isinstance(results.get(name), Exception)]
-        
-        for retry in range(max_retries):
-            if not failed_tasks:
-                break
+            results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
+            max_retries = 3
             
-            log.info(f"Retrying {len(failed_tasks)} failed task(s) (attempt {retry + 1}/{max_retries})...")
-            still_failed = []
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_name = {
+                    executor.submit(func, *func_args): name
+                    for name, func, func_args in download_tasks
+                }
+                
+                for future in as_completed(future_to_name):
+                    name = future_to_name[future]
+                    try:
+                        results[name] = future.result()
+                        log.info(f"✓ Completed: {name}")
+                    except Exception as e:
+                        log.error(f"✗ Failed: {name} - {e}")
+                        results[name] = e
             
-            for name, func, func_args in failed_tasks:
-                try:
-                    results[name] = func(*func_args)
-                    log.info(f"✓ Retry succeeded: {name}")
-                except Exception as e:
-                    log.error(f"✗ Retry failed: {name} - {e}")
-                    results[name] = e
-                    still_failed.append((name, func, func_args))
+            # Retry failed tasks
+            failed_tasks = [(name, func, func_args) 
+                            for name, func, func_args in download_tasks 
+                            if isinstance(results.get(name), Exception)]
             
-            failed_tasks = still_failed
-        
-        # Save successful results
-        for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade", "wui"]:
-            if name in results and not isinstance(results[name], Exception):
-                data = results[name]
-                log.debug(f"Downloaded {name} data: {data}")
-                save_numpy(task_info, data, args.output_dir)
-                results_status[name] = True
-            else:
-                results_status[name] = False
-        
-        # Handle landfire (returns list)
-        if "landfire" in results and not isinstance(results["landfire"], Exception):
-            for lf_data in results["landfire"]:
-                log.debug(f"Downloaded LANDFIRE data: {lf_data}")
-                save_numpy(task_info, lf_data, args.output_dir)
-            results_status["landfire"] = True
+            for retry in range(max_retries):
+                if not failed_tasks:
+                    break
+                
+                log.info(f"Retrying {len(failed_tasks)} failed task(s) (attempt {retry + 1}/{max_retries})...")
+                still_failed = []
+                
+                for name, func, func_args in failed_tasks:
+                    try:
+                        results[name] = func(*func_args)
+                        log.info(f"✓ Retry succeeded: {name}")
+                    except Exception as e:
+                        log.error(f"✗ Retry failed: {name} - {e}")
+                        results[name] = e
+                        still_failed.append((name, func, func_args))
+                
+                failed_tasks = still_failed
+            
+            # Save successful results
+            for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade", "wui"]:
+                if name in results and not isinstance(results[name], Exception):
+                    data = results[name]
+                    log.debug(f"Downloaded {name} data: {data}")
+                    save_numpy(task_info, data, args.output_dir)
+                    results_status[name] = True
+                elif name in results:
+                    results_status[name] = False
+            
+            # Handle landfire (returns list)
+            if "landfire" in results and not isinstance(results["landfire"], Exception):
+                for lf_data in results["landfire"]:
+                    log.debug(f"Downloaded LANDFIRE data: {lf_data}")
+                    save_numpy(task_info, lf_data, args.output_dir)
+                results_status["landfire"] = True
+            elif "landfire" in results:
+                results_status["landfire"] = False
         else:
-            results_status["landfire"] = False
+            log.info("⏭️ Skipping all GEE datasets (not in --only)")
 
         # Sequential Download (HRRR)
-        hrrr = download_hrrr(task_info, args.herbie_cache_dir)
+        if should_process("hrrr"):
+            hrrr = download_hrrr(task_info, args.herbie_cache_dir)
 
-        if hrrr:
-            for hrrr_data in hrrr:
-                log.debug(f"Downloaded HRRR data: {hrrr_data}")
-                save_numpy(task_info, hrrr_data, args.output_dir)
-            
-            if hrrr[0].note and hrrr[0].note.get('data_gaps'):
-                write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
-            results_status["hrrr"] = True
+            if hrrr:
+                for hrrr_data in hrrr:
+                    log.debug(f"Downloaded HRRR data: {hrrr_data}")
+                    save_numpy(task_info, hrrr_data, args.output_dir)
+                
+                if hrrr[0].note and hrrr[0].note.get('data_gaps'):
+                    write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
+                results_status["hrrr"] = True
+            else:
+                log.warning(f"⚠️ No HRRR data available for event {task_info.event_id}")
+                results_status["hrrr"] = False
         else:
-            log.warning(f"⚠️ No HRRR data available for event {task_info.event_id}")
-            results_status["hrrr"] = False
+            log.info("⏭️ Skipping hrrr (not in --only)")
         
         # Report status
         failed = [name for name, success in results_status.items() if not success]
@@ -2774,6 +2807,14 @@ def main() -> None:
         action="store_true",
         help="Enable verbose logging output"
     )
+    parser.add_argument(
+        "--only",
+        type=str,
+        default=None,
+        help="Only process specific feature(s). Comma-separated list. "
+             "Available: burn_perimeters, frp_day, frp_night, elevation, landfire, "
+             "building_height, landcover, lai, satellite, hillshade, wui, hrrr"
+    )
 
     args = parser.parse_args()
 
@@ -2785,6 +2826,11 @@ def main() -> None:
     )
 
     # Create ProcessingArgs from command line arguments
+    only_features = None
+    if args.only:
+        only_features = [f.strip() for f in args.only.split(',') if f.strip()]
+        log.info(f"Processing only: {only_features}")
+    
     processing_args = ProcessingArgs(
         resolution=args.resolution,
         buffer=args.buffer,
@@ -2793,6 +2839,7 @@ def main() -> None:
         interpolation=args.interpolation,
         herbie_cache_dir=args.herbie_cache_dir,
         verbose=args.verbose,
+        only=only_features,
     )
 
     # Batch mode or single mode
