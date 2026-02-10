@@ -157,6 +157,9 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
     plot_config = {
         'elevation': {'cmap': 'terrain', 'label': 'Elevation (m)'},
         'burn_perimeters': {'cmap': 'Reds', 'label': 'Burn Perimeter'},
+        'frp': {'cmap': 'hot', 'label': 'Fire Radiative Power (MW)'},
+        'frp_day': {'cmap': 'hot', 'label': 'Daytime FRP (MW)'},
+        'frp_night': {'cmap': 'hot', 'label': 'Nighttime FRP (MW)'},
         'cbd': {'cmap': 'YlGn', 'label': 'Canopy Bulk Density'},
         'cc': {'cmap': 'Greens', 'label': 'Canopy Cover (%)'},
         'r2': {'cmap': 'Blues', 'label': 'Relative Humidity (%)'},

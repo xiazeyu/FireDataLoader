@@ -4,6 +4,7 @@ Fire Data Loader
 
 A tool for downloading and processing wildfire-related geospatial data from multiple sources:
 - FEDS25MTBS: Fire perimeter data
+- Fire Radiative Power (FRP): From NASA FIRMS (2024+) or FEDS25MTBS firepix (pre-2024)
 - USGS 3DEP: Elevation data
 - LANDFIRE: Canopy bulk density and canopy cover
 - HRRR: Weather data (humidity, wind)
@@ -32,7 +33,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
-from typing import Literal, Callable
+from typing import Literal, Callable, Optional
 
 # Third-party imports
 import ee
@@ -64,6 +65,36 @@ log = logging.getLogger(__name__)
 # Default Herbie cache directory
 DEFAULT_HERBIE_CACHE_DIR = "./datasets/herbie"
 
+# Default paths for FRP data
+DEFAULT_FIRMS_DIR = "datasets/FIRMS"
+DEFAULT_FEDS25MTBS_DIR = "datasets/FEDS25MTBS"
+DEFAULT_FIREPIX_DIR = f"{DEFAULT_FEDS25MTBS_DIR}/firepix"
+DEFAULT_FIRELIST_PATH = f"{DEFAULT_FEDS25MTBS_DIR}/fireslist2012-2023.csv"
+
+# FIRMS data files (VIIRS)
+FIRMS_FILES = [
+    "fire_archive_SV-C2_708942.csv",  # VIIRS archive 2025
+    "fire_nrt_SV-C2_708942.csv",       # VIIRS near-real-time 2025
+    "fire_archive_SV-C2_713904.csv" ,  # VIIRS archive 2024
+]
+
+# Columns to load from FIRMS CSV (reduces memory and speeds up loading)
+FIRMS_USECOLS = ['latitude', 'longitude', 'acq_date', 'acq_time', 'frp', 'confidence', 'daynight']
+
+# Module-level caches for FRP data (avoid reloading large CSV files)
+_firms_cache: dict[str, pd.DataFrame] = {}
+_firepix_cache: dict[str, pd.DataFrame] = {}
+
+
+def clear_frp_cache() -> None:
+    """Clear cached FIRMS and Firepix data to free memory.
+    
+    Call this when done processing fires or when memory is needed.
+    """
+    _firms_cache.clear()
+    _firepix_cache.clear()
+    log.info("Cleared FIRMS and Firepix cache")
+
 
 # =============================================================================
 # Fire Information Functions
@@ -71,7 +102,7 @@ DEFAULT_HERBIE_CACHE_DIR = "./datasets/herbie"
 
 def get_fire_info(
     event_id: str,
-    firelist_path: str = 'datasets/FEDS25MTBS/fireslist2012-2023.csv'
+    firelist_path: str = DEFAULT_FIRELIST_PATH
 ) -> FireInfo:
     """Load fire event information from the FEDS25MTBS dataset.
     
@@ -147,7 +178,7 @@ def geometries_are_equal(geom1, geom2, threshold: float = 1e-4) -> bool:
 def get_fire_progression_dates(
     event_id: str,
     year: int,
-    base_dir: str = 'datasets/FEDS25MTBS'
+    base_dir: str = DEFAULT_FEDS25MTBS_DIR
 ) -> tuple[datetime, datetime]:
     """Find the actual fire progression dates from FEDS25MTBS perimeter data.
     
@@ -224,7 +255,7 @@ def get_task_info(
     resolution: int = 30,
     buffer: int = 100,
     crs: str = "EPSG:5070",
-    feds25mtbs_base_dir: str = 'datasets/FEDS25MTBS',
+    feds25mtbs_base_dir: str = DEFAULT_FEDS25MTBS_DIR,
 ) -> TaskInfo:
     """Create a processing task configuration from fire event information.
     
@@ -330,7 +361,7 @@ def load_numpy(filepath: str) -> DataWithMetadata:
 
 def process_feds25mtbs(
     task_info: TaskInfo,
-    base_dir: str = 'datasets/FEDS25MTBS'
+    base_dir: str = DEFAULT_FEDS25MTBS_DIR
 ) -> DataWithMetadata:
     """Process FEDS25MTBS fire perimeter data into rasterized time series.
     
@@ -455,6 +486,550 @@ def process_feds25mtbs(
         timestamps=timestamps,
         source="'FEDS25MTBS; https://doi.org/10.1038/s41597-022-01343-0; requested via SharePoint by Huilin'",
         resolution=375,
+    )
+
+
+# =============================================================================
+# FRP (Fire Radiative Power) Processing Functions
+# =============================================================================
+
+def _get_perimeter_masks_from_data(
+    perimeter_data: DataWithMetadata,
+) -> tuple[list[np.ndarray], list[datetime]]:
+    """Extract perimeter masks and timestamps from DataWithMetadata.
+    
+    Converts the output of process_feds25mtbs into the format needed
+    for FRP masking.
+    
+    Args:
+        perimeter_data: DataWithMetadata from process_feds25mtbs.
+    
+    Returns:
+        Tuple of (list of perimeter masks, list of timestamps).
+    """
+    masks = [mask.astype(bool) for mask in perimeter_data.data]
+    timestamps = perimeter_data.timestamps or []
+    return masks, timestamps
+
+
+def _get_perimeter_mask_for_time(
+    target_time: datetime,
+    perimeter_masks: list[np.ndarray],
+    perimeter_timestamps: list[datetime],
+) -> Optional[np.ndarray]:
+    """Get the appropriate perimeter mask for a given time.
+    
+    Returns the most recent perimeter that is <= target_time.
+    
+    Args:
+        target_time: Target timestamp.
+        perimeter_masks: List of perimeter masks.
+        perimeter_timestamps: List of perimeter timestamps.
+    
+    Returns:
+        Perimeter mask or None if no suitable mask found.
+    """
+    if not perimeter_masks:
+        return None
+    
+    best_mask = None
+    best_time = None
+    
+    for mask, ts in zip(perimeter_masks, perimeter_timestamps):
+        if ts <= target_time:
+            if best_time is None or ts > best_time:
+                best_mask = mask
+                best_time = ts
+    
+    return best_mask
+
+
+def _load_firms_data(
+    task_info: TaskInfo,
+    firms_dir: str = DEFAULT_FIRMS_DIR,
+    buffer_deg: float = 0.01,
+) -> pd.DataFrame:
+    """Load FIRMS data for fires from 2024 onwards.
+    
+    Filters FIRMS data by spatial and temporal bounds defined in TaskInfo.
+    
+    Args:
+        task_info: Task configuration with bounds and time range.
+        firms_dir: Directory containing FIRMS CSV files.
+        buffer_deg: Buffer in degrees to add around bounds for spatial filtering.
+    
+    Returns:
+        DataFrame with columns [Lat, Lon, FRP, Confidence, DNFlag, t, Event_ID].
+    """
+    log.info(f"Loading FIRMS data for event {task_info.event_id} (year {task_info.year})")
+    
+    # Transform bounds from target CRS back to lat/lon for filtering
+    transformer = Transformer.from_crs(task_info.crs, "EPSG:4326", always_xy=True)
+    minx, miny, maxx, maxy = task_info.bounds
+    
+    # Transform all four corners
+    corners_x = [minx, maxx, minx, maxx]
+    corners_y = [miny, miny, maxy, maxy]
+    lons, lats = transformer.transform(corners_x, corners_y)
+    
+    min_lon, max_lon = min(lons), max(lons)
+    min_lat, max_lat = min(lats), max(lats)
+    
+    # Add buffer
+    min_lon -= buffer_deg
+    max_lon += buffer_deg
+    min_lat -= buffer_deg
+    max_lat += buffer_deg
+    
+    # Time bounds (add 1 day buffer)
+    t_start = task_info.t_start - timedelta(days=1)
+    t_end = task_info.t_end + timedelta(days=1)
+    
+    all_data = []
+    
+    for firms_file in FIRMS_FILES:
+        filepath = os.path.join(firms_dir, firms_file)
+        if not os.path.exists(filepath):
+            log.warning(f"FIRMS file not found: {filepath}")
+            continue
+        
+        # Check cache first
+        if filepath in _firms_cache:
+            log.info(f"Using cached {firms_file} ({len(_firms_cache[filepath]):,} points)")
+            df = _firms_cache[filepath]
+        else:
+            log.info(f"Loading {firms_file} (this may take a moment for large files)...")
+            df = pd.read_csv(filepath, usecols=FIRMS_USECOLS)
+            
+            # Create datetime column
+            df['acq_time_str'] = df['acq_time'].astype(str).str.zfill(4)
+            df['t'] = pd.to_datetime(
+                df['acq_date'] + ' ' + 
+                df['acq_time_str'].str[:2] + ':' + 
+                df['acq_time_str'].str[2:]
+            )
+            df = df.drop(columns=['acq_time_str', 'acq_date', 'acq_time'])
+            
+            # Cache for future use
+            _firms_cache[filepath] = df
+            log.info(f"  Cached {len(df):,} points from {firms_file}")
+        
+        # Spatial filtering
+        spatial_mask = (
+            (df['latitude'] >= min_lat) &
+            (df['latitude'] <= max_lat) &
+            (df['longitude'] >= min_lon) &
+            (df['longitude'] <= max_lon)
+        )
+
+        # Temporal filtering
+        temporal_mask = (df['t'] >= t_start) & (df['t'] <= t_end)
+        
+        filtered = df[spatial_mask & temporal_mask].copy()
+        
+        if len(filtered) > 0:
+            log.info(f"  Found {len(filtered)} fire points in {firms_file}")
+            all_data.append(filtered)
+    
+    if not all_data:
+        log.warning("No FIRMS data found for the specified bounds and time range")
+        return pd.DataFrame(columns=['Lat', 'Lon', 'FRP', 'Confidence', 'DNFlag', 't', 'Event_ID'])
+    
+    combined = pd.concat(all_data, ignore_index=True)
+    
+    # Remove duplicates (same location and time from different files)
+    combined = combined.drop_duplicates(subset=['latitude', 'longitude', 't'])
+    
+    # Format output to match Firepix format
+    output = pd.DataFrame({
+        'Lat': combined['latitude'],
+        'Lon': combined['longitude'],
+        'FRP': combined['frp'],
+        'Confidence': combined['confidence'],
+        'DNFlag': combined['daynight'],
+        't': combined['t'],
+        'Event_ID': task_info.event_id
+    })
+    
+    log.info(f"Total FIRMS points loaded: {len(output)}")
+    return output
+
+
+def _load_firepix_data(
+    task_info: TaskInfo,
+    firepix_dir: str = DEFAULT_FIREPIX_DIR,
+) -> pd.DataFrame:
+    """Load pre-processed firepix data for fires before 2024.
+    
+    Args:
+        task_info: Task configuration with event ID and year.
+        firepix_dir: Directory containing Firepix CSV files.
+    
+    Returns:
+        DataFrame with columns [Lat, Lon, FRP, Confidence, DNFlag, t, Event_ID].
+    """
+    filepath = os.path.join(firepix_dir, f"Firepix_{task_info.year}.csv")
+    
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Firepix file not found: {filepath}")
+    
+    # Check cache first
+    if filepath in _firepix_cache:
+        log.info(f"Using cached firepix data for year {task_info.year}")
+        df = _firepix_cache[filepath]
+    else:
+        log.info(f"Loading firepix data from {filepath}")
+        df = pd.read_csv(filepath)
+        df["t"] = pd.to_datetime(df["t"])
+        _firepix_cache[filepath] = df
+        log.info(f"  Cached {len(df):,} firepix points for year {task_info.year}")
+    
+    # Filter by event_id
+    df = df[df["Event_ID"] == task_info.event_id].copy()
+    
+    if df.empty:
+        log.warning(f"No firepix data found for event_id: {task_info.event_id}")
+        return pd.DataFrame(columns=['Lat', 'Lon', 'FRP', 'Confidence', 'DNFlag', 't', 'Event_ID'])
+    
+    # Select relevant columns
+    output = df[['Lat', 'Lon', 'FRP', 'Confidence', 'DNFlag', 't', 'Event_ID']].copy()
+    
+    log.info(f"Loaded {len(output)} firepix points for event {task_info.event_id}")
+    return output
+
+
+def _gaussian_splat_rasterize(
+    x: np.ndarray,
+    y: np.ndarray,
+    values: np.ndarray,
+    bounds: tuple[float, float, float, float],
+    shape: tuple[int, int],
+    resolution: int,
+    source_resolution: float = 375.0,
+) -> np.ndarray:
+    """Rasterize points using Gaussian splatting (conservative downscaling).
+    
+    Each point's FRP value is distributed using a Gaussian kernel sized to match
+    the source sensor's pixel footprint. The total FRP is conserved - the sum
+    of the output raster equals the sum of input FRP values (within the bounds).
+    
+    Args:
+        x: X coordinates in target CRS.
+        y: Y coordinates in target CRS.
+        values: Values to rasterize (e.g., FRP).
+        bounds: Bounding box (minx, miny, maxx, maxy).
+        shape: Output shape (height, width).
+        resolution: Target pixel resolution in meters.
+        source_resolution: Source sensor pixel resolution in meters (default 375m for VIIRS).
+    
+    Returns:
+        Rasterized array with conserved total values.
+    """
+    minx, miny, maxx, maxy = bounds
+    height, width = shape
+    
+    # Initialize accumulator
+    raster = np.zeros(shape, dtype=np.float64)
+    
+    # Calculate Gaussian sigma in pixels
+    # Use half the source resolution as sigma so that ~95% of energy is within the footprint
+    sigma_pixels = (source_resolution / resolution) / 2.0
+    
+    # Kernel radius: cover 3 sigma in each direction
+    kernel_radius = int(np.ceil(3 * sigma_pixels))
+    
+    # Convert coordinates to fractional pixel indices
+    px = (x - minx) / resolution
+    py = (maxy - y) / resolution
+    
+    for i in range(len(values)):
+        # Center pixel
+        px_center = int(np.round(px[i]))
+        py_center = int(np.round(py[i]))
+        
+        val = values[i]
+        
+        # First pass: compute all weights for this point to normalize
+        weights_list = []
+        coords_list = []
+        
+        for dy in range(-kernel_radius, kernel_radius + 1):
+            for dx in range(-kernel_radius, kernel_radius + 1):
+                row = py_center + dy
+                col = px_center + dx
+                
+                if 0 <= row < height and 0 <= col < width:
+                    # Distance from point center to pixel center
+                    dist_x = (col + 0.5) - px[i]
+                    dist_y = (row + 0.5) - py[i]
+                    dist_sq = dist_x**2 + dist_y**2
+                    
+                    # Gaussian weight
+                    w = np.exp(-dist_sq / (2 * sigma_pixels**2))
+                    weights_list.append(w)
+                    coords_list.append((row, col))
+        
+        # Conservative: normalize weights so they sum to 1, then distribute FRP
+        if weights_list:
+            total_weight = sum(weights_list)
+            for (row, col), w in zip(coords_list, weights_list):
+                # Each pixel gets a fraction of the total FRP
+                raster[row, col] += (w / total_weight) * val
+    
+    return raster.astype(np.float32)
+
+
+def _rasterize_fire_points(
+    df: pd.DataFrame,
+    task_info: TaskInfo,
+    perimeter_masks: list[np.ndarray],
+    perimeter_timestamps: list[datetime],
+    time_interval_hours: int = 12,
+) -> tuple[list[np.ndarray], list[datetime]]:
+    """Rasterize fire points and apply perimeter masking.
+    
+    Groups fire points by time intervals and creates FRP rasters
+    using Gaussian splatting (conservative downscaling) method.
+    
+    Args:
+        df: DataFrame with fire point data.
+        task_info: Task configuration.
+        perimeter_masks: List of fire perimeter masks.
+        perimeter_timestamps: List of perimeter timestamps.
+        time_interval_hours: Time interval for grouping points.
+    
+    Returns:
+        Tuple of (list of FRP rasters, list of timestamps).
+    """
+    if df.empty:
+        return [], []
+    
+    bounds = task_info.bounds
+    shape = task_info.shape
+    resolution = task_info.resolution
+    
+    # Transform point coordinates from lat/lon to target CRS
+    transformer = Transformer.from_crs("EPSG:4326", task_info.crs, always_xy=True)
+    x, y = transformer.transform(df["Lon"].values, df["Lat"].values)
+    df = df.copy()
+    df["x"] = np.array(x)
+    df["y"] = np.array(y)
+    
+    # Group by time intervals
+    df["time_group"] = df["t"].dt.floor(f"{time_interval_hours}h")
+    time_groups = sorted(df["time_group"].unique())
+    
+    rasters = []
+    timestamps = []
+    
+    for tg in tqdm(time_groups, desc="Rasterizing FRP"):
+        group = df[df["time_group"] == tg]
+        
+        # Rasterize using Gaussian splatting
+        raster = _gaussian_splat_rasterize(
+            group["x"].values,
+            group["y"].values,
+            group["FRP"].values,
+            bounds,
+            shape,
+            resolution,
+        )
+        
+        # Apply perimeter mask
+        target_time = pd.Timestamp(tg).to_pydatetime()
+        mask = _get_perimeter_mask_for_time(target_time, perimeter_masks, perimeter_timestamps)
+        if mask is not None:
+            raster = raster * mask.astype(np.float32)
+        
+        rasters.append(raster)
+        timestamps.append(target_time)
+    
+    return rasters, timestamps
+
+
+def process_frp(
+    task_info: TaskInfo,
+    perimeter_data: DataWithMetadata,
+    time_interval_hours: int = 12,
+    time_of_day: Literal['all', 'day', 'night'] = 'all',
+    firms_dir: str = DEFAULT_FIRMS_DIR,
+    firepix_dir: str = DEFAULT_FIREPIX_DIR,
+) -> DataWithMetadata:
+    """Process fire pixels and FRP for a fire event.
+    
+    Automatically selects the data source based on the year:
+    - For fires from 2024 onwards: Uses NASA FIRMS data
+    - For fires before 2024: Uses pre-processed firepix data from FEDS25MTBS
+    
+    Uses Gaussian splatting for rasterization.
+    Results are masked by the known fire perimeter at each time step.
+    
+    Args:
+        task_info: Task configuration containing event details and processing parameters.
+        perimeter_data: DataWithMetadata from process_feds25mtbs for masking.
+        time_interval_hours: Time interval for grouping fire points (default 12 hours).
+        time_of_day: Filter by time of day - 'all' (default), 'day' (06:00-18:00 UTC),
+                     or 'night' (18:00-06:00 UTC).
+        firms_dir: Directory containing FIRMS CSV files.
+        firepix_dir: Directory containing pre-processed Firepix CSV files.
+    
+    Returns:
+        DataWithMetadata containing:
+        - name: "frp", "frp_day", or "frp_night" depending on time_of_day
+        - data: List of FRP rasters (numpy arrays) for each time step
+        - timestamps: List of datetime objects corresponding to each raster
+        - source: Data source used (FIRMS or FEDS25MTBS firepix)
+        - resolution: Spatial resolution in meters
+        - unit: "MW" (megawatts)
+    """
+    # Determine output name and source suffix based on time_of_day
+    if time_of_day == 'day':
+        output_name = "frp_day"
+        source_suffix = " - Day"
+        observation_time = "day (06:00-18:00 UTC)"
+        log.info(f"Processing DAYTIME FRP for event: {task_info.event_id}")
+    elif time_of_day == 'night':
+        output_name = "frp_night"
+        source_suffix = " - Night"
+        observation_time = "night (18:00-06:00 UTC)"
+        log.info(f"Processing NIGHTTIME FRP for event: {task_info.event_id}")
+    else:
+        output_name = "frp"
+        source_suffix = ""
+        observation_time = None
+        log.info(f"Processing FRP for event: {task_info.event_id}")
+    
+    log.info(f"Year: {task_info.year}, Time range: {task_info.t_start} to {task_info.t_end}")
+    
+    # Get perimeter masks from existing processed data
+    perimeter_masks, perimeter_timestamps = _get_perimeter_masks_from_data(perimeter_data)
+    log.info(f"Using {len(perimeter_masks)} perimeter frames for masking")
+    
+    # Select data source based on year
+    if task_info.year >= 2024:
+        log.info("Using FIRMS data source (year >= 2024)")
+        source = f"NASA FIRMS (VIIRS Active Fire){source_suffix}"
+        df = _load_firms_data(task_info, firms_dir)
+    else:
+        log.info("Using FEDS25MTBS firepix data source (year < 2024)")
+        source = f"FEDS25MTBS Firepix (VIIRS Active Fire){source_suffix}"
+        df = _load_firepix_data(task_info, firepix_dir)
+    
+    # Apply time-of-day filter if specified
+    if time_of_day == 'day':
+        df = df.copy()
+        hour = df["t"].dt.hour
+        df = df[(hour >= 6) & (hour < 18)].copy()
+        log.info(f"Daytime fire points (06:00-18:00 UTC): {len(df)}")
+    elif time_of_day == 'night':
+        df = df.copy()
+        hour = df["t"].dt.hour
+        df = df[(hour >= 18) | (hour < 6)].copy()
+        log.info(f"Nighttime fire points (18:00-06:00 UTC): {len(df)}")
+    
+    n_points = len(df)
+    if time_of_day == 'all':
+        log.info(f"Total fire points: {n_points}")
+    
+    # Build note dictionary
+    note: dict = {
+        "event_id": task_info.event_id,
+        "year": task_info.year,
+        "n_points": n_points,
+        "time_interval_hours": time_interval_hours,
+        "rasterization_method": "gaussian_splatting",
+        "perimeter_masked": True,
+    }
+    if observation_time:
+        note["observation_time"] = observation_time
+    
+    if df.empty:
+        log.warning(f"No fire points found for {output_name}")
+        return DataWithMetadata(
+            name=output_name,
+            data=[],
+            timestamps=[],
+            source=source,
+            resolution=task_info.resolution,
+            unit="MW",
+            note=note,
+        )
+    
+    # Rasterize fire points to grid with perimeter masking
+    rasters, timestamps = _rasterize_fire_points(
+        df, task_info, perimeter_masks, perimeter_timestamps, time_interval_hours
+    )
+    
+    log.info(f"Created {len(rasters)} time step rasters")
+    
+    note["n_perimeter_frames"] = len(perimeter_masks)
+    
+    return DataWithMetadata(
+        name=output_name,
+        data=rasters,
+        timestamps=timestamps,
+        source=source,
+        resolution=task_info.resolution,
+        unit="MW",
+        note=note,
+    )
+
+
+def process_frp_day(
+    task_info: TaskInfo,
+    perimeter_data: DataWithMetadata,
+    firms_dir: str = DEFAULT_FIRMS_DIR,
+    firepix_dir: str = DEFAULT_FIREPIX_DIR,
+) -> DataWithMetadata:
+    """Process daytime FRP only (observations from 06:00-18:00 UTC).
+    
+    Wrapper around process_frp with time_of_day='day' and 24-hour intervals.
+    
+    Args:
+        task_info: Task configuration containing event details.
+        perimeter_data: DataWithMetadata from process_feds25mtbs for masking.
+        firms_dir: Directory containing FIRMS CSV files.
+        firepix_dir: Directory containing pre-processed Firepix CSV files.
+    
+    Returns:
+        DataWithMetadata with daytime FRP rasters at 24-hour intervals.
+    """
+    return process_frp(
+        task_info=task_info,
+        perimeter_data=perimeter_data,
+        time_interval_hours=24,
+        time_of_day='day',
+        firms_dir=firms_dir,
+        firepix_dir=firepix_dir,
+    )
+
+
+def process_frp_night(
+    task_info: TaskInfo,
+    perimeter_data: DataWithMetadata,
+    firms_dir: str = DEFAULT_FIRMS_DIR,
+    firepix_dir: str = DEFAULT_FIREPIX_DIR,
+) -> DataWithMetadata:
+    """Process nighttime FRP only (observations from 18:00-06:00 UTC).
+    
+    Wrapper around process_frp with time_of_day='night' and 24-hour intervals.
+    
+    Args:
+        task_info: Task configuration containing event details.
+        perimeter_data: DataWithMetadata from process_feds25mtbs for masking.
+        firms_dir: Directory containing FIRMS CSV files.
+        firepix_dir: Directory containing pre-processed Firepix CSV files.
+    
+    Returns:
+        DataWithMetadata with nighttime FRP rasters at 24-hour intervals.
+    """
+    return process_frp(
+        task_info=task_info,
+        perimeter_data=perimeter_data,
+        time_interval_hours=24,
+        time_of_day='night',
+        firms_dir=firms_dir,
+        firepix_dir=firepix_dir,
     )
 
 
@@ -1928,6 +2503,21 @@ def main() -> None:
         log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
     
     save_numpy(task_info, feds25mtbs, args.output_dir)
+
+    # -------------------------------------------------------------------------
+    # FRP (Fire Radiative Power) Processing
+    # -------------------------------------------------------------------------
+    log.info("Processing FRP (Fire Radiative Power) data...")
+    
+    # Process daytime FRP
+    frp_day = process_frp_day(task_info, feds25mtbs)
+    save_numpy(task_info, frp_day, args.output_dir)
+    log.info(f"✓ Saved frp_day.npy ({len(frp_day.data)} time steps)")
+    
+    # Process nighttime FRP
+    frp_night = process_frp_night(task_info, feds25mtbs)
+    save_numpy(task_info, frp_night, args.output_dir)
+    log.info(f"✓ Saved frp_night.npy ({len(frp_night.data)} time steps)")
 
     # -------------------------------------------------------------------------
     # Parallel Downloads (GEE-based datasets)

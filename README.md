@@ -7,6 +7,7 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 | Dataset | Description | Resolution |
 |---------|-------------|------------|
 | FEDS25MTBS | Fire perimeter time series | 375m |
+| Fire Radiative Power (FRP) | Fire intensity from VIIRS (day/night) | 375m |
 | USGS 3DEP | Elevation | 1m |
 | LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m |
 | HRRR | Weather: humidity (r2), wind (u10, v10) | 3km |
@@ -93,6 +94,8 @@ Data is saved as `.npy` files in `output/<event_id>/`:
 output/CA3859812261820171009/
 ├── task_info.npy         # Processing configuration
 ├── burn_perimeters.npy   # Fire perimeter time series
+├── frp_day.npy           # Daytime Fire Radiative Power (MW)
+├── frp_night.npy         # Nighttime Fire Radiative Power (MW)
 ├── elevation.npy         # Terrain elevation
 ├── cbd.npy               # Canopy Bulk Density
 ├── cc.npy                # Canopy Cover
