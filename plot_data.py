@@ -1,9 +1,14 @@
 """
-Plot all exported numpy data for a fire event.
+Plot all exported numpy data for fire events.
 
 Usage:
-    python plot_data.py <event_id>
-    python plot_data.py CA3859812261820171009
+    Single event:
+        python plot_data.py <event_id>
+        python plot_data.py CA3859812261820171009
+    
+    Batch processing:
+        python plot_data.py --batch events.txt
+        python plot_data.py --batch CA123,CA456,CA789
 """
 
 import argparse
@@ -338,12 +343,102 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output',
         plt.close()
 
 
+def parse_batch_input(batch_input: str, output_dir: str = 'output') -> list[str]:
+    """Parse batch input which can be a file path or comma-separated event IDs.
+    
+    Args:
+        batch_input: Either a path to a file containing event IDs (one per line)
+                     or a comma-separated string of event IDs.
+        output_dir: Output directory to check for existing event data.
+    
+    Returns:
+        List of event IDs to process.
+    """
+    # Check if it's a file
+    if os.path.isfile(batch_input):
+        print(f"Reading event IDs from file: {batch_input}")
+        with open(batch_input, 'r') as f:
+            event_ids = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        print(f"Found {len(event_ids)} event IDs in file")
+        return event_ids
+    
+    # Otherwise treat as comma-separated
+    event_ids = [eid.strip() for eid in batch_input.split(',') if eid.strip()]
+    print(f"Parsed {len(event_ids)} event IDs from input")
+    return event_ids
+
+
+def plot_batch(
+    event_ids: list[str],
+    output_dir: str = 'output',
+    timeseries: str | None = None,
+    show: bool = False,
+) -> dict[str, bool]:
+    """Plot data for multiple fire events.
+    
+    Args:
+        event_ids: List of event IDs to plot.
+        output_dir: Output directory containing event data.
+        timeseries: If specified, plot time series for this layer.
+        show: Display plots interactively.
+    
+    Returns:
+        Dictionary mapping event IDs to success status.
+    """
+    print(f"\nBatch plotting {len(event_ids)} fire events...")
+    print("=" * 60)
+    
+    results: dict[str, bool] = {}
+    successful = 0
+    failed = 0
+    
+    for i, event_id in enumerate(event_ids, 1):
+        print(f"\n[{i}/{len(event_ids)}] Processing: {event_id}")
+        
+        try:
+            if timeseries:
+                plot_time_series(event_id, timeseries, output_dir, show)
+            else:
+                plot_event_data(event_id, output_dir, show)
+            results[event_id] = True
+            successful += 1
+            print(f"✓ Completed: {event_id}")
+        except Exception as e:
+            results[event_id] = False
+            failed += 1
+            print(f"✗ Failed: {event_id} - {e}")
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("BATCH PLOTTING COMPLETE")
+    print(f"  Total events: {len(event_ids)}")
+    print(f"  Successful: {successful}")
+    print(f"  Failed: {failed}")
+    print("=" * 60)
+    
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Plot exported fire event data',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument('event_id', type=str, help='Fire event ID to plot')
+    
+    # Mutually exclusive: single event_id or batch mode
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        'event_id',
+        type=str,
+        nargs='?',
+        help='Single fire event ID to plot'
+    )
+    input_group.add_argument(
+        '--batch',
+        type=str,
+        help='Batch mode: file path with event IDs (one per line) or comma-separated event IDs'
+    )
+    
     parser.add_argument(
         '-o', '--output_dir',
         type=str,
@@ -364,10 +459,23 @@ def main():
     
     args = parser.parse_args()
     
-    if args.timeseries:
-        plot_time_series(args.event_id, args.timeseries, args.output_dir, args.show)
+    # Batch mode or single mode
+    if args.batch:
+        event_ids = parse_batch_input(args.batch, args.output_dir)
+        if not event_ids:
+            print("Error: No valid event IDs found in batch input")
+            sys.exit(1)
+        plot_batch(event_ids, args.output_dir, args.timeseries, args.show)
     else:
-        plot_event_data(args.event_id, args.output_dir, args.show)
+        # Single event mode
+        event_id = args.event_id
+        if not event_id:
+            parser.error("Either event_id or --batch is required")
+        
+        if args.timeseries:
+            plot_time_series(event_id, args.timeseries, args.output_dir, args.show)
+        else:
+            plot_event_data(event_id, args.output_dir, args.show)
 
 
 if __name__ == '__main__':

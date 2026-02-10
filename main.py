@@ -19,21 +19,31 @@ Prerequisites:
     $ earthengine set_project your-google-cloud-project-id
 
 Usage:
-    python main.py <event_id> [options]
+    Single event:
+        python main.py <event_id> [options]
+    
+    Batch processing (from file):
+        python main.py --batch events.txt [options]
+    
+    Batch processing (comma-separated):
+        python main.py --batch CA123,CA456,CA789 [options]
 
-Example:
+Examples:
     python main.py CA3859812261820171009 -v
+    python main.py --batch event_ids.txt --workers 4
+    python main.py --batch CA123,CA456 -r 10 -o results/
 """
 
 # Standard library imports
 import argparse
+import json
 import logging
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
-from typing import Literal, Callable, Optional
+from typing import Literal, Callable, Optional, Any
 
 # Third-party imports
 import ee
@@ -54,7 +64,7 @@ from shapely.geometry import box, MultiPolygon
 from tqdm import tqdm
 
 # Local imports
-from schemas import FireInfo, TaskInfo, DataWithMetadata
+from schemas import FireInfo, TaskInfo, DataWithMetadata, ProcessingArgs
 
 # Configure xarray options
 xr.set_options(use_new_combine_kwarg_defaults=True)
@@ -1737,8 +1747,6 @@ def write_data_gap_log(
         data_gaps: List of data gap records.
         output_dir: Base output directory.
     """
-    import json
-    
     event_id = task_info.event_id
     output_path = os.path.join(output_dir, event_id)
     os.makedirs(output_path, exist_ok=True)
@@ -2400,6 +2408,295 @@ def download_hillshade(task_info: TaskInfo) -> DataWithMetadata:
 
 
 # =============================================================================
+# Single Fire Processing
+# =============================================================================
+
+def process_single_fire(
+    event_id: str,
+    args: ProcessingArgs,
+) -> dict[str, Any]:
+    """Process a single fire event and download all associated data.
+    
+    This is the main processing function for a single fire event. It:
+    1. Loads fire information and creates task configuration
+    2. Processes FEDS25MTBS perimeter data
+    3. Processes FRP (day and night)
+    4. Downloads GEE-based datasets in parallel
+    5. Downloads HRRR weather data
+    
+    Args:
+        event_id: Unique identifier for the fire event.
+        args: Processing configuration parameters.
+    
+    Returns:
+        Dictionary with dataset names as keys and success status (bool) as values.
+        On error, contains 'error' key with False and 'message' with error details.
+    """
+    results_status: dict[str, Any] = {}
+    
+    try:
+        # Load fire information
+        fire_info = get_fire_info(event_id)
+        log.info(f"Retrieved fire info for event_id: {event_id}")
+        log.debug(f"Generated fire info: {fire_info}")
+
+        task_info = get_task_info(
+            fire_info, resolution=args.resolution, buffer=args.buffer, crs=args.crs)
+
+        log.debug(f"Generated task info: {task_info}")
+        save_numpy(task_info, DataWithMetadata(
+            name="task_info", data=[task_info]), args.output_dir)
+        
+        log.info(f"Processing event: {task_info.event_id}")
+        log.info(f"  Date range: {task_info.t_start} to {task_info.t_end}")
+        log.info(f"  Resolution: {task_info.resolution}m, Shape: {task_info.shape}")
+        log.info(f"  CRS: {task_info.crs}, Bounds: {task_info.bounds}")
+        
+        # Process FEDS25MTBS
+        feds25mtbs = process_feds25mtbs(task_info)
+        log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
+        
+        if args.interpolation > 0:
+            log.info(f"Interpolating burn perimeters with multiplier: {args.interpolation}")
+            feds25mtbs = interpolate_burn_perimeters(feds25mtbs, multiplier=args.interpolation)
+            log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
+        
+        save_numpy(task_info, feds25mtbs, args.output_dir)
+        results_status["burn_perimeters"] = True
+
+        # Process FRP
+        log.info("Processing FRP (Fire Radiative Power) data...")
+        
+        frp_day = process_frp_day(task_info, feds25mtbs)
+        save_numpy(task_info, frp_day, args.output_dir)
+        log.info(f"✓ Saved frp_day.npy ({len(frp_day.data)} time steps)")
+        results_status["frp_day"] = True
+        
+        frp_night = process_frp_night(task_info, feds25mtbs)
+        save_numpy(task_info, frp_night, args.output_dir)
+        log.info(f"✓ Saved frp_night.npy ({len(frp_night.data)} time steps)")
+        results_status["frp_night"] = True
+
+        # Parallel Downloads (GEE-based datasets)
+        log.info("Starting parallel downloads for GEE datasets...")
+        
+        download_tasks: list[tuple[str, Callable, tuple]] = [
+            ("elevation", download_usgs, (task_info,)),
+            ("landfire", download_landfire, (task_info,)),
+            ("building_height", download_building_height, (task_info,)),
+            ("landcover", download_eca, (task_info,)),
+            ("lai", download_tc, (task_info,)),
+            ("satellite", download_satellite, (task_info,)),
+            ("hillshade", download_hillshade, (task_info,)),
+            ("wui", download_globalwui, (task_info,)),
+        ]
+        
+        results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
+        max_retries = 3
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_name = {
+                executor.submit(func, *func_args): name
+                for name, func, func_args in download_tasks
+            }
+            
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    results[name] = future.result()
+                    log.info(f"✓ Completed: {name}")
+                except Exception as e:
+                    log.error(f"✗ Failed: {name} - {e}")
+                    results[name] = e
+        
+        # Retry failed tasks
+        failed_tasks = [(name, func, func_args) 
+                        for name, func, func_args in download_tasks 
+                        if isinstance(results.get(name), Exception)]
+        
+        for retry in range(max_retries):
+            if not failed_tasks:
+                break
+            
+            log.info(f"Retrying {len(failed_tasks)} failed task(s) (attempt {retry + 1}/{max_retries})...")
+            still_failed = []
+            
+            for name, func, func_args in failed_tasks:
+                try:
+                    results[name] = func(*func_args)
+                    log.info(f"✓ Retry succeeded: {name}")
+                except Exception as e:
+                    log.error(f"✗ Retry failed: {name} - {e}")
+                    results[name] = e
+                    still_failed.append((name, func, func_args))
+            
+            failed_tasks = still_failed
+        
+        # Save successful results
+        for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade", "wui"]:
+            if name in results and not isinstance(results[name], Exception):
+                data = results[name]
+                log.debug(f"Downloaded {name} data: {data}")
+                save_numpy(task_info, data, args.output_dir)
+                results_status[name] = True
+            else:
+                results_status[name] = False
+        
+        # Handle landfire (returns list)
+        if "landfire" in results and not isinstance(results["landfire"], Exception):
+            for lf_data in results["landfire"]:
+                log.debug(f"Downloaded LANDFIRE data: {lf_data}")
+                save_numpy(task_info, lf_data, args.output_dir)
+            results_status["landfire"] = True
+        else:
+            results_status["landfire"] = False
+
+        # Sequential Download (HRRR)
+        hrrr = download_hrrr(task_info, args.herbie_cache_dir)
+
+        if hrrr:
+            for hrrr_data in hrrr:
+                log.debug(f"Downloaded HRRR data: {hrrr_data}")
+                save_numpy(task_info, hrrr_data, args.output_dir)
+            
+            if hrrr[0].note and hrrr[0].note.get('data_gaps'):
+                write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
+            results_status["hrrr"] = True
+        else:
+            log.warning(f"⚠️ No HRRR data available for event {task_info.event_id}")
+            results_status["hrrr"] = False
+        
+        # Report status
+        failed = [name for name, success in results_status.items() if not success]
+        if failed:
+            log.warning(f"Some downloads failed for {event_id}: {failed}")
+        else:
+            log.info(f"✓ Successfully processed all data for {event_id}")
+        
+        return results_status
+        
+    except Exception as e:
+        log.error(f"Failed to process event {event_id}: {e}")
+        return {"error": False, "message": str(e)}
+
+
+# =============================================================================
+# Batch Processing
+# =============================================================================
+
+def parse_batch_input(batch_input: str) -> list[str]:
+    """Parse batch input which can be a file path or comma-separated event IDs.
+    
+    Args:
+        batch_input: Either a path to a file containing event IDs (one per line)
+                     or a comma-separated string of event IDs.
+    
+    Returns:
+        List of event IDs to process.
+    """
+    # Check if it's a file
+    if os.path.isfile(batch_input):
+        log.info(f"Reading event IDs from file: {batch_input}")
+        with open(batch_input, 'r') as f:
+            event_ids = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        log.info(f"Found {len(event_ids)} event IDs in file")
+        return event_ids
+    
+    # Otherwise treat as comma-separated
+    event_ids = [eid.strip() for eid in batch_input.split(',') if eid.strip()]
+    log.info(f"Parsed {len(event_ids)} event IDs from input")
+    return event_ids
+
+
+def process_batch(
+    event_ids: list[str],
+    args: ProcessingArgs,
+    max_workers: int = 2,
+) -> dict[str, dict[str, Any]]:
+    """Process multiple fire events in parallel.
+    
+    Processes multiple fire events concurrently while sharing cached data
+    (FIRMS, firepix) across all workers. Each event is processed independently.
+    
+    Args:
+        event_ids: List of event IDs to process.
+        args: Processing configuration parameters.
+        max_workers: Maximum number of parallel fire event processors.
+                     Note: Each event also runs internal parallel downloads,
+                     so keep this value moderate (2-4 recommended).
+    
+    Returns:
+        Dictionary mapping event IDs to their processing results.
+    """
+    log.info(f"Starting batch processing of {len(event_ids)} fire events")
+    log.info(f"Using {max_workers} parallel workers")
+    
+    # Initialize Earth Engine once before parallel processing
+    log.info("Initializing Google Earth Engine...")
+    _ensure_ee_initialized()
+    
+    all_results: dict[str, dict[str, Any]] = {}
+    successful = 0
+    failed = 0
+    
+    def process_with_logging(event_id: str) -> tuple[str, dict[str, Any]]:
+        """Wrapper to process a single fire with proper logging context."""
+        log.info(f"▶ Starting processing: {event_id}")
+        try:
+            result = process_single_fire(event_id, args)
+            return event_id, result
+        except Exception as e:
+            log.error(f"✗ Fatal error processing {event_id}: {e}")
+            return event_id, {"error": False, "message": str(e)}
+    
+    # Process events in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_with_logging, eid): eid for eid in event_ids}
+        
+        for future in tqdm(as_completed(futures), total=len(event_ids), desc="Batch Progress"):
+            event_id = futures[future]
+            try:
+                eid, result = future.result()
+                all_results[eid] = result
+                
+                if "error" not in result:
+                    successful += 1
+                    log.info(f"✓ Completed: {eid}")
+                else:
+                    failed += 1
+                    log.error(f"✗ Failed: {eid} - {result.get('message', 'Unknown error')}")
+            except Exception as e:
+                failed += 1
+                all_results[event_id] = {"error": False, "message": str(e)}
+                log.error(f"✗ Exception for {event_id}: {e}")
+    
+    # Summary
+    log.info("=" * 60)
+    log.info("BATCH PROCESSING COMPLETE")
+    log.info(f"  Total events: {len(event_ids)}")
+    log.info(f"  Successful: {successful}")
+    log.info(f"  Failed: {failed}")
+    log.info("=" * 60)
+    
+    # Write batch summary
+    summary_path = os.path.join(args.output_dir, "batch_summary.json")
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    summary = {
+        "total": len(event_ids),
+        "successful": successful,
+        "failed": failed,
+        "results": all_results,
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2, default=str)
+    log.info(f"Batch summary saved to {summary_path}")
+    
+    return all_results
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -2407,13 +2704,33 @@ def main() -> None:
     """Main entry point for the Fire Data Loader.
     
     Parses command-line arguments and orchestrates the data download and
-    processing pipeline for a single fire event.
+    processing pipeline for single or batch fire event processing.
     """
     parser = argparse.ArgumentParser(
         description="Fire Data Loader - Download and process wildfire geospatial data",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("event_id", type=str, help="Event ID to process")
+    
+    # Mutually exclusive: single event_id or batch mode
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "event_id",
+        type=str,
+        nargs="?",
+        help="Single event ID to process"
+    )
+    input_group.add_argument(
+        "--batch",
+        type=str,
+        help="Batch mode: file path with event IDs (one per line) or comma-separated event IDs"
+    )
+    
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=2,
+        help="Number of parallel workers for batch processing (recommended: 2-4)"
+    )
     parser.add_argument(
         "--resolution", "-r",
         type=int,
@@ -2465,151 +2782,40 @@ def main() -> None:
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # Load fire information
-    event_id = args.event_id
-    fire_info = get_fire_info(event_id)
+    # Create ProcessingArgs from command line arguments
+    processing_args = ProcessingArgs(
+        resolution=args.resolution,
+        buffer=args.buffer,
+        crs=args.crs,
+        output_dir=args.output_dir,
+        interpolation=args.interpolation,
+        herbie_cache_dir=args.herbie_cache_dir,
+        verbose=args.verbose,
+    )
 
-    log.info(f"Retrieved fire info for event_id: {event_id}")
-    log.debug(f"Generated fire info: {fire_info}")
-
-    task_info = get_task_info(
-        fire_info, resolution=args.resolution, buffer=args.buffer, crs=args.crs)
-
-    log.debug(f"Generated task info: {task_info}")
-    save_numpy(task_info, DataWithMetadata(
-        name="task_info", data=[task_info]), args.output_dir)
-    
-    log.info(f"Processing FEDS25MTBS data for event_id: {task_info.event_id}")
-    log.info(f"FEDS25MTBS data start date: {task_info.t_start}")
-    log.info(f"FEDS25MTBS data end date: {task_info.t_end}")
-    log.info(f"FEDS25MTBS data resolution: {task_info.resolution}")
-    log.info(f"FEDS25MTBS data shape: {task_info.shape}")
-    log.info(f"FEDS25MTBS data crs: {task_info.crs}")
-    log.info(f"FEDS25MTBS data bounds: {task_info.bounds}")
-    
-    feds25mtbs = process_feds25mtbs(task_info)
-    log.debug(f"Processed FEDS25MTBS data: {feds25mtbs}")
-    
-    if args.interpolation > 0:
-        log.info(
-            f"Interpolating burn perimeters with multiplier: {args.interpolation}")
-        feds25mtbs = interpolate_burn_perimeters(
-            feds25mtbs, multiplier=args.interpolation)
-        log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
-    
-    save_numpy(task_info, feds25mtbs, args.output_dir)
-
-    # -------------------------------------------------------------------------
-    # FRP (Fire Radiative Power) Processing
-    # -------------------------------------------------------------------------
-    log.info("Processing FRP (Fire Radiative Power) data...")
-    
-    # Process daytime FRP
-    frp_day = process_frp_day(task_info, feds25mtbs)
-    save_numpy(task_info, frp_day, args.output_dir)
-    log.info(f"✓ Saved frp_day.npy ({len(frp_day.data)} time steps)")
-    
-    # Process nighttime FRP
-    frp_night = process_frp_night(task_info, feds25mtbs)
-    save_numpy(task_info, frp_night, args.output_dir)
-    log.info(f"✓ Saved frp_night.npy ({len(frp_night.data)} time steps)")
-
-    # -------------------------------------------------------------------------
-    # Parallel Downloads (GEE-based datasets)
-    # -------------------------------------------------------------------------
-    # Initialize Earth Engine once before parallel downloads
-    log.info("Initializing Google Earth Engine...")
-    _ensure_ee_initialized()
-    
-    log.info("Starting parallel downloads for GEE datasets...")
-    
-    # Define download tasks: (name, function, args)
-    download_tasks: list[tuple[str, Callable, tuple]] = [
-        ("elevation", download_usgs, (task_info,)),
-        ("landfire", download_landfire, (task_info,)),
-        ("building_height", download_building_height, (task_info,)),
-        ("landcover", download_eca, (task_info,)),
-        ("lai", download_tc, (task_info,)),
-        ("satellite", download_satellite, (task_info,)),
-        ("hillshade", download_hillshade, (task_info,)),
-        ("wui", download_globalwui, (task_info,)),
-    ]
-    
-    results: dict[str, DataWithMetadata | list[DataWithMetadata] | Exception] = {}
-    max_retries = 3
-    
-    # First pass: parallel downloads
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_name = {
-            executor.submit(func, *func_args): name
-            for name, func, func_args in download_tasks
-        }
+    # Batch mode or single mode
+    if args.batch:
+        event_ids = parse_batch_input(args.batch)
+        if not event_ids:
+            log.error("No valid event IDs found in batch input")
+            return
         
-        for future in as_completed(future_to_name):
-            name = future_to_name[future]
-            try:
-                results[name] = future.result()
-                log.info(f"✓ Completed: {name}")
-            except Exception as e:
-                log.error(f"✗ Failed: {name} - {e}")
-                results[name] = e
-    
-    # Retry failed tasks sequentially
-    failed_tasks = [(name, func, func_args) 
-                    for name, func, func_args in download_tasks 
-                    if isinstance(results.get(name), Exception)]
-    
-    for retry in range(max_retries):
-        if not failed_tasks:
-            break
+        # Initialize Earth Engine before batch processing
+        log.info("Initializing Google Earth Engine...")
+        _ensure_ee_initialized()
         
-        log.info(f"Retrying {len(failed_tasks)} failed task(s) (attempt {retry + 1}/{max_retries})...")
-        still_failed = []
-        
-        for name, func, func_args in failed_tasks:
-            try:
-                results[name] = func(*func_args)
-                log.info(f"✓ Retry succeeded: {name}")
-            except Exception as e:
-                log.error(f"✗ Retry failed: {name} - {e}")
-                results[name] = e
-                still_failed.append((name, func, func_args))
-        
-        failed_tasks = still_failed
-    
-    # Save successful results
-    for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade", "wui"]:
-        if name in results and not isinstance(results[name], Exception):
-            data = results[name]
-            log.debug(f"Downloaded {name} data: {data}")
-            save_numpy(task_info, data, args.output_dir)
-    
-    # Handle landfire (returns list)
-    if "landfire" in results and not isinstance(results["landfire"], Exception):
-        for lf_data in results["landfire"]:
-            log.debug(f"Downloaded LANDFIRE data: {lf_data}")
-            save_numpy(task_info, lf_data, args.output_dir)
-
-    # -------------------------------------------------------------------------
-    # Sequential Download (HRRR - has progress bar)
-    # -------------------------------------------------------------------------
-    hrrr = download_hrrr(task_info, args.herbie_cache_dir)
-
-    if hrrr:
-        for hrrr_data in hrrr:
-            log.debug(f"Downloaded HRRR data: {hrrr_data}")
-            save_numpy(task_info, hrrr_data, args.output_dir)
-        
-        # Write data gap log if there are gaps (after all data saved)
-        if hrrr[0].note and hrrr[0].note.get('data_gaps'):
-            write_data_gap_log(task_info, hrrr[0].note['data_gaps'], args.output_dir)
+        process_batch(event_ids, processing_args, max_workers=args.workers)
     else:
-        log.warning(f"⚠️ No HRRR data available for event {task_info.event_id} - HRRR variables (r2, u10, v10) will not be saved.")
-    
-    # Report any failed downloads
-    failed = [name for name, result in results.items() if isinstance(result, Exception)]
-    if failed:
-        log.warning(f"Some downloads failed: {failed}")
+        # Single event mode
+        event_id = args.event_id
+        if not event_id:
+            parser.error("Either event_id or --batch is required")
+        
+        # Initialize Earth Engine
+        log.info("Initializing Google Earth Engine...")
+        _ensure_ee_initialized()
+        
+        process_single_fire(event_id, processing_args)
 
 
 # =============================================================================

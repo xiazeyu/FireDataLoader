@@ -86,3 +86,28 @@ class DataWithMetadata:
     resolution: Optional[int] = None
     unit: Optional[str] = None
     note: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ProcessingArgs:
+    """Arguments for fire data processing.
+    
+    Encapsulates all configuration parameters needed for processing fire events.
+    Used by both single-event and batch processing functions.
+    
+    Attributes:
+        resolution: Spatial resolution in meters.
+        buffer: Buffer distance around fire bounds in meters.
+        crs: Target coordinate reference system.
+        output_dir: Output directory for saved data.
+        interpolation: Number of intermediate frames to interpolate.
+        herbie_cache_dir: Directory for caching HRRR GRIB files.
+        verbose: Enable verbose logging output.
+    """
+    resolution: int = 30
+    buffer: int = 100
+    crs: str = "EPSG:5070"
+    output_dir: str = "output"
+    interpolation: int = 0
+    herbie_cache_dir: str = "./datasets/herbie"
+    verbose: bool = False

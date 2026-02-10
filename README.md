@@ -48,23 +48,40 @@ To get a project ID:
 ## Quick Start
 
 ```bash
-# Process a fire event
+# Process a single fire event
 python main.py CA3859812261820171009
 
 # With verbose output
 python main.py CA3859812261820171009 -v
+
+# Batch process multiple fires
+python main.py --batch events.txt --workers 4
 ```
 
 ## Usage
 
+### Single Event
+
 ```bash
 python main.py <event_id> [options]
+```
+
+### Batch Processing
+
+```bash
+# From a file (one event ID per line)
+python main.py --batch events.txt [options]
+
+# From comma-separated list  
+python main.py --batch CA123,CA456,CA789 [options]
 ```
 
 ### Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `--batch` | Batch mode: file path or comma-separated event IDs | - |
+| `-w, --workers` | Parallel workers for batch processing | 2 |
 | `-r, --resolution` | Spatial resolution (meters) | 30 |
 | `-b, --buffer` | Buffer around fire bounds (meters) | 20 |
 | `-c, --crs` | Target coordinate reference system | EPSG:5070 |
@@ -84,7 +101,15 @@ python main.py CA3859812261820171009 -t 3
 
 # Custom output directory
 python main.py CA3859812261820171009 -o ./my_output
+
+# Batch process from file with 4 workers
+python main.py --batch fire_events.txt -w 4 -o results/
+
+# Batch process specific events
+python main.py --batch CA123,CA456,CA789 --workers 3
 ```
+
+The batch summary is saved to `output/batch_summary.json`.
 
 ## Output
 
@@ -122,8 +147,11 @@ python plot_data.py CA3859812261820171009 --show
 # Plot time series frames (e.g., burn perimeters)
 python plot_data.py CA3859812261820171009 -t burn_perimeters
 
-# Plot time series and display interactively
-python plot_data.py CA3859812261820171009 -t burn_perimeters --show
+# Batch plot multiple events
+python plot_data.py --batch events.txt
+
+# Batch plot from comma-separated list
+python plot_data.py --batch CA123,CA456,CA789
 ```
 
 ### Loading Data
