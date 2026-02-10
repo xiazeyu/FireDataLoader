@@ -591,9 +591,9 @@ def _load_firms_data(
     min_lat -= buffer_deg
     max_lat += buffer_deg
     
-    # Time bounds (add 1 day buffer)
-    t_start = task_info.t_start - timedelta(days=1)
-    t_end = task_info.t_end + timedelta(days=1)
+    # Time bounds (use exact task time range, no buffer to avoid empty first frame)
+    t_start = task_info.t_start
+    t_end = task_info.t_end
     
     all_data = []
     
