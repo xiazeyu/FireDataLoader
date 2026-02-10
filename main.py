@@ -840,8 +840,10 @@ def _rasterize_fire_points(
             resolution,
         )
         
+        # Use the first observation time in the group to preserve original timestep
+        target_time = group["t"].iloc[0].to_pydatetime()
+        
         # Apply perimeter mask
-        target_time = pd.Timestamp(tg).to_pydatetime()
         mask = _get_perimeter_mask_for_time(target_time, perimeter_masks, perimeter_timestamps)
         if mask is not None:
             raster = raster * mask.astype(np.float32)
@@ -2728,8 +2730,8 @@ def main() -> None:
     parser.add_argument(
         "--workers", "-w",
         type=int,
-        default=2,
-        help="Number of parallel workers for batch processing (recommended: 2-4)"
+        default=1,
+        help="Number of parallel workers for batch processing (recommended: 1-4)"
     )
     parser.add_argument(
         "--resolution", "-r",
