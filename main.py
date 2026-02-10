@@ -707,11 +707,13 @@ def _gaussian_splat_rasterize(
     resolution: int,
     source_resolution: float = 375.0,
 ) -> np.ndarray:
-    """Rasterize points using Gaussian splatting (conservative downscaling).
+    """Rasterize points using Gaussian splatting (average-preserving interpolation).
     
-    Each point's FRP value is distributed using a Gaussian kernel sized to match
-    the source sensor's pixel footprint. The total FRP is conserved - the sum
-    of the output raster equals the sum of input FRP values (within the bounds).
+    Each point's FRP value is interpolated using a Gaussian kernel sized to match
+    the source sensor's pixel footprint. The central pixel retains the original
+    observed value, with surrounding pixels receiving gradually decreasing values
+    based on Gaussian falloff. The average FRP across the source resolution area
+    (e.g., 375m for VIIRS) approximates the original observed value.
     
     Args:
         x: X coordinates in target CRS.
@@ -723,7 +725,7 @@ def _gaussian_splat_rasterize(
         source_resolution: Source sensor pixel resolution in meters (default 375m for VIIRS).
     
     Returns:
-        Rasterized array with conserved total values.
+        Rasterized array with average-preserved values within source pixel regions.
     """
     minx, miny, maxx, maxy = bounds
     height, width = shape
@@ -749,10 +751,7 @@ def _gaussian_splat_rasterize(
         
         val = values[i]
         
-        # First pass: compute all weights for this point to normalize
-        weights_list = []
-        coords_list = []
-        
+        # Apply Gaussian kernel directly (average-preserving)
         for dy in range(-kernel_radius, kernel_radius + 1):
             for dx in range(-kernel_radius, kernel_radius + 1):
                 row = py_center + dy
@@ -764,17 +763,13 @@ def _gaussian_splat_rasterize(
                     dist_y = (row + 0.5) - py[i]
                     dist_sq = dist_x**2 + dist_y**2
                     
-                    # Gaussian weight
+                    # Gaussian weight (peaks at 1 at center, decreases outward)
                     w = np.exp(-dist_sq / (2 * sigma_pixels**2))
-                    weights_list.append(w)
-                    coords_list.append((row, col))
-        
-        # Conservative: normalize weights so they sum to 1, then distribute FRP
-        if weights_list:
-            total_weight = sum(weights_list)
-            for (row, col), w in zip(coords_list, weights_list):
-                # Each pixel gets a fraction of the total FRP
-                raster[row, col] += (w / total_weight) * val
+                    
+                    # Average-preserving: pixel value = weight * original value
+                    # At center, w ≈ 1 so pixel ≈ val
+                    # Away from center, w < 1 so pixel < val
+                    raster[row, col] += w * val
     
     return raster.astype(np.float32)
 
@@ -789,7 +784,7 @@ def _rasterize_fire_points(
     """Rasterize fire points and apply perimeter masking.
     
     Groups fire points by time intervals and creates FRP rasters
-    using Gaussian splatting (conservative downscaling) method.
+    using Gaussian splatting (average-preserving interpolation) method.
     
     Args:
         df: DataFrame with fire point data.
@@ -937,7 +932,7 @@ def process_frp(
         "year": task_info.year,
         "n_points": n_points,
         "time_interval_hours": time_interval_hours,
-        "rasterization_method": "gaussian_splatting",
+        "rasterization_method": "gaussian_splatting_average",
         "perimeter_masked": True,
     }
     if observation_time:
