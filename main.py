@@ -499,6 +499,136 @@ def process_feds25mtbs(
     )
 
 
+def process_fireline(
+    task_info: TaskInfo,
+    base_dir: str = DEFAULT_FEDS25MTBS_DIR,
+    width: float = 375.0,
+) -> DataWithMetadata:
+    """Process FEDS25MTBS fireline data into rasterized time series.
+
+    Reads the fireline layer from the GeoPackage file for the fire event,
+    buffers each line geometry by half the specified width (to create a
+    corridor of the given total width), and rasterizes each timestep to
+    match the task grid specification.  Only includes frames within the
+    task_info time range where the fireline actually changed from the
+    previous frame.
+
+    Args:
+        task_info: Task configuration with event details and grid parameters.
+        base_dir: Base directory containing the FEDS25MTBS data.
+        width: Total width of the fireline corridor in meters.
+
+    Returns:
+        DataWithMetadata containing boolean rasters for each timestep.
+
+    Raises:
+        AssertionError: If the GeoPackage file doesn't exist.
+    """
+    log.info(f"Processing fireline for event_id: {task_info.event_id}")
+
+    data_dir = os.path.join(
+        base_dir, str(task_info.year), task_info.event_id + '.gpkg'
+    )
+    assert os.path.exists(
+        data_dir
+    ), f"Error: FEDS25MTBS data not found at {data_dir}"
+
+    gdf = gpd.read_file(data_dir, layer='fireline')
+
+    # Sort by timestamp
+    gdf = gdf.sort_values('t').reset_index(drop=True)
+
+    all_data = []
+    all_timestamps = []
+
+    for _, row in gdf.iterrows():
+        timestamp = pd.to_datetime(row['t']).to_pydatetime()
+        geom = row.geometry
+
+        if geom is None:
+            continue
+
+        all_data.append(geom)
+        all_timestamps.append(timestamp)
+
+    # Filter to only include frames within t_start and t_end
+    filtered_data = []
+    filtered_timestamps = []
+    for ts, geom in zip(all_timestamps, all_data):
+        if task_info.t_start <= ts <= task_info.t_end:
+            filtered_timestamps.append(ts)
+            filtered_data.append(geom)
+
+    log.info(
+        f"Filtered fireline frames: {len(filtered_data)} of {len(all_data)} "
+        f"(t_start={task_info.t_start}, t_end={task_info.t_end})"
+    )
+
+    # Filter to only include frames where fireline geometry changed.
+    # Cannot use geometries_are_equal (area-based) because lines have zero area;
+    # use .equals() for exact coordinate comparison instead.
+    data_list = []
+    timestamps = []
+    last_imported_geom = None
+    for ts, geom in zip(filtered_timestamps, filtered_data):
+        if last_imported_geom is None or not last_imported_geom.equals(geom):
+            data_list.append(geom)
+            timestamps.append(ts)
+            last_imported_geom = geom
+
+    log.info(f"Unique fireline frames imported: {len(data_list)} of {len(filtered_data)}")
+
+    # Calculate grid dimensions from task bounds
+    t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
+    res = task_info.resolution
+    transform = from_origin(t_minx, t_maxy, res, res)
+
+    log.info(f"Target Grid: {task_info.shape} pixels @ {res}m resolution")
+
+    # Prepare GeoDataFrame with geometries
+    gdf_lines = gpd.GeoDataFrame(
+        {'geometry': data_list, 'timestamp': timestamps},
+        crs="EPSG:4326",
+    )
+
+    log.info(
+        f"Reprojecting fireline geometries from EPSG:4326 to target CRS {task_info.crs}"
+    )
+    gdf_lines = gdf_lines.to_crs(task_info.crs)
+
+    # Buffer line geometries by half the width to create corridors
+    half_width = width / 2.0
+    gdf_lines['geometry'] = gdf_lines.geometry.buffer(half_width)
+
+    # Rasterize each timestep
+    processed_rasters = []
+    for _, row in gdf_lines.iterrows():
+        shapes = [(row.geometry, 1)]
+
+        raster = features.rasterize(
+            shapes=shapes,
+            out_shape=task_info.shape,
+            transform=transform,
+            fill=0,
+            dtype=np.uint8,
+            all_touched=True,
+        )
+        assert raster.shape == task_info.shape, (
+            "Rasterized shape does not match target shape"
+        )
+        raster = raster.astype(np.bool)
+        processed_rasters.append(raster)
+
+    return DataWithMetadata(
+        name="fireline",
+        data=processed_rasters,
+        timestamps=timestamps,
+        source="FEDS25MTBS; https://doi.org/10.1038/s41597-022-01343-0",
+        resolution=375,
+        note={"width_m": width},
+    )
+
+
 # =============================================================================
 # FRP (Fire Radiative Power) Processing Functions
 # =============================================================================
@@ -2481,6 +2611,16 @@ def process_single_fire(
                 results_status["burn_perimeters"] = True
         else:
             log.info("⏭️ Skipping burn_perimeters (not in --only)")
+
+        # Process fireline
+        if should_process("fireline"):
+            log.info("Processing fireline data...")
+            fireline = process_fireline(task_info)
+            save_numpy(task_info, fireline, args.output_dir)
+            log.info(f"✓ Saved fireline.npy ({len(fireline.data)} time steps)")
+            results_status["fireline"] = True
+        else:
+            log.info("⏭️ Skipping fireline (not in --only)")
 
         # Process FRP
         if should_process("frp_day"):
