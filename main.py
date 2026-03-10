@@ -2115,8 +2115,8 @@ def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
                 .select(['B4', 'B3', 'B2'])
         
         image = s2.median().rename(['R', 'G', 'B'])
-        # Scale Sentinel-2 values to 0-255 range
-        image = image.divide(10000).multiply(255).clamp(0, 255)
+        # Scale Sentinel-2 values to 0-255 range (divide by 3000 for brighter visualization)
+        image = image.divide(3000).multiply(255).clamp(0, 255)
         source = "Copernicus Sentinel-2"
         native_res = 10
     
