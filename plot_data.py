@@ -310,27 +310,54 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output',
     
     print(f"Plotting {n_frames} frames for {layer_name}")
     
+    # Choose colormap based on layer type
+    cmap_map = {
+        'burn_perimeters': 'Reds',
+        'frp': 'hot',
+        'frp_day': 'hot',
+        'frp_night': 'hot',
+        'fireline': 'Reds',
+        'fireline_max': 'hot',
+    }
+    cmap = cmap_map.get(layer_name, 'Reds')
+    
+    # Compute shared color range across all frames for a consistent scale
+    all_vals = [f for f in data_obj.data if isinstance(f, np.ndarray)]
+    if all_vals:
+        vmin = min(float(f.min()) for f in all_vals)
+        vmax = max(float(f.max()) for f in all_vals)
+    else:
+        vmin, vmax = None, None
+    
     n_cols = min(4, n_frames)
     n_rows = (n_frames + n_cols - 1) // n_cols
     
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols + 1, 3.5 * n_rows))
     fig.suptitle(f'{event_id} - {layer_name} Time Series', fontsize=12)
     
     axes = axes.flatten() if n_frames > 1 else [axes]
     
+    images = []
     for idx, frame in enumerate(data_obj.data):
         title = f"Frame {idx + 1}"
         if data_obj.timestamps and idx < len(data_obj.timestamps):
             title = data_obj.timestamps[idx].strftime('%Y-%m-%d %H:%M')
         
-        im = axes[idx].imshow(frame, cmap='Reds', interpolation='nearest')
+        im = axes[idx].imshow(frame, cmap=cmap, interpolation='nearest',
+                              vmin=vmin, vmax=vmax)
         axes[idx].set_title(title, fontsize=9)
         axes[idx].axis('off')
+        images.append(im)
     
     for idx in range(n_frames, len(axes)):
         axes[idx].axis('off')
     
-    plt.tight_layout()
+    # Reserve right margin for the colorbar, then add it in a dedicated axes
+    fig.subplots_adjust(right=0.88)
+    if images:
+        unit = f" ({data_obj.unit})" if data_obj.unit else ""
+        cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+        fig.colorbar(images[0], cax=cbar_ax, label=f"{layer_name}{unit}")
     
     # Save figure
     output_fig = os.path.join(output_dir, event_id, f'{event_id}_{layer_name}_timeseries.png')

@@ -634,11 +634,13 @@ def process_fireline_max(
     fireline_data: DataWithMetadata,
     frp_data: DataWithMetadata,
 ) -> DataWithMetadata:
-    """Assign maximum nearby FRP values to fireline pixels.
+    """Assign per-segment maximum nearby FRP to fireline pixels.
 
-    For each fireline timestep, finds the temporally closest FRP raster and
-    computes the local maximum FRP within the fireline corridor using a
-    sliding window whose radius matches half the fireline width (~375 m).
+    For each fireline timestep, identifies disconnected fireline segments
+    via connected-component labelling.  For each segment, dilates its mask
+    by 375 m to capture nearby FRP values, takes the maximum FRP within
+    that dilated region, and assigns it uniformly to every pixel of that
+    segment.  Different segments receive independent max-FRP values.
     Pixels outside the fireline mask are set to zero.
 
     Args:
@@ -648,10 +650,10 @@ def process_fireline_max(
                   (FRP rasters in MW).
 
     Returns:
-        DataWithMetadata containing float32 rasters of max FRP along the
-        fireline for each timestep, in MW.
+        DataWithMetadata containing float32 rasters with per-segment
+        max-FRP values, in MW.
     """
-    from scipy.ndimage import maximum_filter
+    from scipy.ndimage import binary_dilation, label
 
     log.info(f"Processing fireline_max for event_id: {task_info.event_id}")
 
@@ -671,15 +673,16 @@ def process_fireline_max(
             unit="MW",
         )
 
-    # Kernel radius in pixels for the local max window (match fireline width)
+    # Build a circular structuring element with radius ~375 m
     width_m = fireline_data.note.get("width_m", 375.0)
-    kernel_px = max(int(round(width_m / task_info.resolution)), 1)
-    # Ensure odd size for symmetric window
-    kernel_size = kernel_px if kernel_px % 2 == 1 else kernel_px + 1
+    radius_px = max(int(round(width_m / task_info.resolution)), 1)
+    diam = 2 * radius_px + 1
+    yy, xx = np.ogrid[-radius_px:radius_px + 1, -radius_px:radius_px + 1]
+    struct = (xx * xx + yy * yy) <= radius_px * radius_px
 
     log.info(
-        f"Max-filter kernel: {kernel_size}x{kernel_size} px "
-        f"({kernel_size * task_info.resolution}m)"
+        f"Search radius: {radius_px} px ({radius_px * task_info.resolution}m), "
+        f"structuring element: {diam}x{diam}"
     )
 
     result_rasters = []
@@ -696,18 +699,29 @@ def process_fireline_max(
                 best_idx = idx
 
         if best_idx is None:
-            # No FRP data at all — zero raster
             result_rasters.append(np.zeros(task_info.shape, dtype=np.float32))
             result_timestamps.append(fl_time)
             continue
 
         frp_raster = frp_rasters[best_idx].astype(np.float32)
 
-        # Compute local max of FRP within the kernel window
-        local_max = maximum_filter(frp_raster, size=kernel_size)
+        # Label disconnected fireline segments
+        labeled, n_segments = label(fl_mask.astype(np.uint8))
 
-        # Mask to fireline corridor only
-        out = np.where(fl_mask, local_max, 0.0).astype(np.float32)
+        out = np.zeros(task_info.shape, dtype=np.float32)
+
+        for seg_id in range(1, n_segments + 1):
+            seg_mask = labeled == seg_id
+
+            # Dilate this segment's mask by 375 m to capture nearby FRP
+            search_mask = binary_dilation(seg_mask, structure=struct)
+
+            # Max FRP within the dilated region of this segment
+            masked_frp = frp_raster[search_mask]
+            seg_max = float(masked_frp.max()) if masked_frp.size > 0 else 0.0
+
+            # Assign uniform value to this segment's pixels
+            out[seg_mask] = seg_max
 
         result_rasters.append(out)
         result_timestamps.append(fl_time)
@@ -722,9 +736,9 @@ def process_fireline_max(
         resolution=task_info.resolution,
         unit="MW",
         note={
-            "description": "Maximum FRP within fireline corridor",
+            "description": "Per-segment max FRP along fireline (within 375m search radius)",
             "width_m": width_m,
-            "kernel_size_px": kernel_size,
+            "search_radius_px": radius_px,
         },
     )
 
