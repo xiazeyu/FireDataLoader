@@ -106,7 +106,7 @@ def plot_all_channels(event_id: str, output_dir: str = 'output'):
         print(f'Error: Directory not found: {event_path}')
         sys.exit(1)
 
-    npy_files = sorted(f for f in os.listdir(event_path) if f.endswith('.npy') and f != 'task_info.npy')
+    npy_files = sorted(f for f in os.listdir(event_path) if f.endswith('.npy') and f not in ('task_info.npy', 'coordinates.npy'))
     if not npy_files:
         print(f'Error: No .npy files found in {event_path}')
         sys.exit(1)

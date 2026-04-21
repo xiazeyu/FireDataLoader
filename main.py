@@ -365,6 +365,84 @@ def load_numpy(filepath: str) -> DataWithMetadata:
     return obj
 
 
+def save_coordinates(
+    task_info: TaskInfo,
+    output_dir: str = 'output'
+) -> None:
+    """Save pixel-center coordinate arrays and CRS for the task grid.
+
+    Writes ``coordinates.npy`` into ``output_dir/event_id/`` containing a
+    :class:`DataWithMetadata` with:
+
+    - ``data[0]``: 1-D array of x (easting/longitude) pixel-center coordinates,
+      shape ``(width,)``.
+    - ``data[1]``: 1-D array of y (northing/latitude) pixel-center coordinates,
+      shape ``(height,)``, ordered top-to-bottom to match raster row order.
+    - ``note``: dict with ``crs`` (short id, e.g. ``"EPSG:5070"``),
+      ``crs_wkt`` / ``crs_proj4`` / ``crs_epsg`` (self-contained CRS
+      definitions for archival / custom-CRS use), ``bounds``
+      (minx, miny, maxx, maxy), ``shape`` (height, width), ``resolution``,
+      and ``transform`` (affine coefficients ``a, b, c, d, e, f``).
+
+    These coordinates correspond to the same grid every other ``.npy`` layer
+    is sampled on, so researchers can wrap arrays directly into ``xarray`` or
+    re-project them using the saved CRS for publication-quality figures.
+
+    Args:
+        task_info: Task configuration with ``bounds``, ``shape``, and ``crs``.
+        output_dir: Base output directory.
+    """
+    minx, miny, maxx, maxy = task_info.bounds
+    height, width = task_info.shape
+
+    px = (maxx - minx) / width if width else 0.0
+    py = (maxy - miny) / height if height else 0.0
+
+    # Pixel-center coordinates. Y is top-to-bottom (north -> south) to match
+    # rasterio/numpy row-major raster ordering used elsewhere in the pipeline.
+    x = minx + (np.arange(width) + 0.5) * px
+    y = maxy - (np.arange(height) + 0.5) * py
+
+    # Affine transform (from_origin equivalent): pixel (col, row) -> (x, y).
+    transform = (px, 0.0, minx, 0.0, -py, maxy)
+
+    # Self-contained CRS info so consumers don't need an EPSG lookup or
+    # network access to reconstruct the projection (useful for archival,
+    # custom CRSes, or environments without a PROJ database).
+    try:
+        from pyproj import CRS as _CRS
+        _crs_obj = _CRS.from_user_input(task_info.crs)
+        crs_wkt = _crs_obj.to_wkt()
+        crs_proj4 = _crs_obj.to_proj4()
+        crs_epsg = _crs_obj.to_epsg()
+    except Exception:  # pragma: no cover - defensive only
+        crs_wkt = None
+        crs_proj4 = None
+        crs_epsg = None
+
+    coords = DataWithMetadata(
+        name="coordinates",
+        data=[x, y],
+        timestamps=None,
+        source="Derived from TaskInfo grid",
+        resolution=task_info.resolution,
+        unit="CRS units",
+        note={
+            "crs": task_info.crs,
+            "crs_wkt": crs_wkt,
+            "crs_proj4": crs_proj4,
+            "crs_epsg": crs_epsg,
+            "bounds": tuple(task_info.bounds),
+            "shape": tuple(task_info.shape),
+            "resolution": task_info.resolution,
+            "transform": transform,
+            "axes": ["x (width)", "y (height, top-to-bottom)"],
+        },
+    )
+
+    save_numpy(task_info, coords, output_dir)
+
+
 # =============================================================================
 # FEDS25MTBS Processing
 # =============================================================================
@@ -2699,6 +2777,11 @@ def process_single_fire(
         log.debug(f"Generated task info: {task_info}")
         save_numpy(task_info, DataWithMetadata(
             name="task_info", data=[task_info]), args.output_dir)
+
+        # Persist the grid coordinates + CRS so downstream consumers (e.g.
+        # xarray, re-projection for publication figures) don't have to
+        # reconstruct them from task_info.
+        save_coordinates(task_info, args.output_dir)
         
         log.info(f"Processing event: {task_info.event_id}")
         log.info(f"  Date range: {task_info.t_start} to {task_info.t_end}")

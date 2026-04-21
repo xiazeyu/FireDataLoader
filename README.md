@@ -4,19 +4,19 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 
 ## Data Sources
 
-| Dataset | Description | Resolution |
-|---------|-------------|------------|
-| FEDS25MTBS | Fire perimeter time series | 375m |
-| Fire Radiative Power (FRP) | Fire intensity from VIIRS (day/night) | 375m |
-| USGS 3DEP | Elevation | 1m |
-| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m |
-| HRRR | Weather: humidity (r2), wind (u10, v10) | 3km |
-| Global Building Atlas | Building heights | 3m |
-| ESA WorldCover | Land cover classification | 10m |
-| Tree Canopy LAI | Leaf Area Index | 10m |
-| NAIP/Sentinel-2 | Satellite imagery (RGB) | 1m/10m |
-| Hillshade | Terrain visualization (from elevation) | 1m |
-| Global WUI | Wildland-Urban Interface classification | 10m |
+| Dataset | Description | Resolution | Feature Name(s) |
+|---------|-------------|------------|-----------------|
+| FEDS25MTBS | Fire perimeter time series | 375m | `burn_perimeters`, `fireline`, `fireline_max` |
+| Fire Radiative Power (FRP) | Fire intensity from VIIRS (day/night) | 375m | `frp_day`, `frp_night` |
+| USGS 3DEP | Elevation | 1m | `elevation` |
+| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m | `cbd`, `cc` |
+| HRRR | Weather: humidity (r2), wind (u10, v10) | 3km | `r2`, `u10`, `v10` |
+| Global Building Atlas | Building heights | 3m | `building_height` |
+| ESA WorldCover | Land cover classification | 10m | `landcover` |
+| Tree Canopy LAI | Leaf Area Index | 10m | `lai` |
+| NAIP/Sentinel-2 | Satellite imagery (RGB) | 1m/10m | `satellite` |
+| Hillshade | Terrain visualization (from elevation) | 1m | `hillshade` |
+| Global WUI | Wildland-Urban Interface classification | 10m | `wui` |
 
 ## Installation
 
@@ -81,9 +81,9 @@ python main.py --batch CA123,CA456,CA789 [options]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--batch` | Batch mode: file path or comma-separated event IDs | - |
-| `-w, --workers` | Parallel workers for batch processing | 2 |
+| `-w, --workers` | Parallel workers for batch processing | 1 |
 | `-r, --resolution` | Spatial resolution (meters) | 30 |
-| `-b, --buffer` | Buffer around fire bounds (meters) | 20 |
+| `-b, --buffer` | Buffer around fire bounds (meters) | 100 |
 | `-c, --crs` | Target coordinate reference system | EPSG:5070 |
 | `-o, --output_dir` | Output directory | output |
 | `-t, --interpolation` | Intermediate frames between timesteps | 0 |
@@ -96,8 +96,10 @@ python main.py --batch CA123,CA456,CA789 [options]
 | Feature | Description |
 |---------|-------------|
 | `burn_perimeters` | Fire perimeter time series from FEDS25MTBS |
-| `frp_day` | Daytime Fire Radiative Power |
-| `frp_night` | Nighttime Fire Radiative Power |
+| `fireline` | Active fireline derived from consecutive perimeter differences |
+| `fireline_max` | Per-pixel maximum FRP along the fireline |
+| `frp_day` | Daytime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
+| `frp_night` | Nighttime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
 | `elevation` | USGS 3DEP elevation |
 | `landfire` | LANDFIRE CBD and Canopy Cover |
 | `building_height` | Global Building Atlas heights |
@@ -145,6 +147,7 @@ Data is saved as `.npy` files in `output/<event_id>/`:
 ```
 output/CA3859812261820171009/
 ├── task_info.npy         # Processing configuration
+├── coordinates.npy       # Pixel-center x/y coordinates + CRS for the grid
 ├── burn_perimeters.npy   # Fire perimeter time series
 ├── frp_day.npy           # Daytime Fire Radiative Power (MW)
 ├── frp_night.npy         # Nighttime Fire Radiative Power (MW)
@@ -161,6 +164,37 @@ output/CA3859812261820171009/
 ├── hillshade.npy         # Terrain hillshade visualization
 └── wui.npy               # Wildland-Urban Interface classification
 ```
+
+### Grid Coordinates (`coordinates.npy`)
+
+Every event directory now also contains `coordinates.npy`, which stores the
+pixel-center coordinates of the common output grid together with the CRS.
+All other raster layers (`elevation.npy`, `frp_*.npy`, `wui.npy`, ...) are
+sampled on this exact grid, so this file is the single source of truth for
+georeferencing the arrays — useful for wrapping outputs into `xarray`
+DataArrays or re-projecting them when preparing publication figures.
+
+```python
+from main import load_numpy
+
+coords = load_numpy('output/CA3859812261820171009/coordinates.npy')
+x, y = coords.data            # 1-D arrays, shape (width,) and (height,)
+crs = coords.note['crs']      # e.g. 'EPSG:5070'
+crs_wkt = coords.note['crs_wkt']    # full WKT2 (works without an EPSG db)
+crs_proj4 = coords.note['crs_proj4']  # legacy PROJ string
+bounds = coords.note['bounds']        # (minx, miny, maxx, maxy)
+height, width = coords.note['shape']
+a, b, c, d, e, f = coords.note['transform']  # affine: (col, row) -> (x, y)
+```
+
+For standard EPSG codes, `note['crs']` alone is enough for pyproj /
+rasterio / cartopy. The extra `crs_wkt` and `crs_proj4` fields are
+included so the file is fully self-describing — useful for archival,
+custom CRSes (e.g. EQUI7, HRRR Lambert), or environments without a PROJ
+database.
+
+`y` is ordered top-to-bottom (north → south) to match the row order of the
+saved rasters.
 
 ### Visualizing Data
 

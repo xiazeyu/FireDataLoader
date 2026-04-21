@@ -178,8 +178,8 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
         'wui': {'cmap': 'tab10', 'label': 'Wildland-Urban Interface'},
     }
     
-    # Skip task_info for plotting
-    data_files = [f for f in npy_files if f != 'task_info.npy']
+    # Skip task_info and coordinates (not raster layers) for plotting
+    data_files = [f for f in npy_files if f not in ('task_info.npy', 'coordinates.npy')]
     
     # Count extra plots needed for burn_perimeters (first + last timestep)
     extra_plots = 1 if 'burn_perimeters.npy' in data_files else 0
