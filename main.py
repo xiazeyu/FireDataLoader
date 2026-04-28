@@ -2700,17 +2700,11 @@ def download_hillshade(task_info: TaskInfo) -> DataWithMetadata:
     # Get elevation data
     collection = ee.ImageCollection("USGS/3DEP/1m").filterBounds(roi)
     
-    if collection.size().getInfo() == 0:
-        # Fallback to SRTM if 3DEP not available
-        log.info("3DEP not available, falling back to SRTM 30m")
-        elevation = ee.Image("USGS/SRTMGL1_003").select('elevation')
-        native_res = 30
-    else:
-        native_proj = collection.first().select('elevation').projection()
-        elevation = collection.mosaic().select('elevation')
-        elevation = elevation.setDefaultProjection(native_proj)
-        native_res = 1
-    
+    native_proj = collection.first().select('elevation').projection()
+    elevation = collection.mosaic().select('elevation')
+    elevation = elevation.setDefaultProjection(native_proj)
+    native_res = 1
+
     # Compute hillshade using ee.Terrain.hillshade
     # Default azimuth=315 (NW), elevation=45 degrees - standard cartographic lighting
     hillshade = ee.Terrain.hillshade(elevation, azimuth=315, elevation=45)
@@ -2724,7 +2718,7 @@ def download_hillshade(task_info: TaskInfo) -> DataWithMetadata:
         name="hillshade",
         data=[data_array.astype(np.uint8)],
         timestamps=[task_info.t_start],
-        source="Computed from USGS 3DEP/SRTM via Google Earth Engine",
+        source="Computed from USGS 3DEP via Google Earth Engine",
         resolution=native_res,
         unit="0-255",
         note={'description': 'Terrain hillshade visualization (azimuth=315°, elevation=45°)'},
