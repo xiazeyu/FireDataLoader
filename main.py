@@ -11,7 +11,7 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 - Global Building Atlas: Building heights
 - ESA WorldCover: Land cover classification
 - Tree Canopy: Leaf Area Index (LAI)
-- NAIP/Sentinel-2: Satellite imagery (RGB)
+- Sentinel-2: Satellite imagery (RGB)
 - Hillshade: Terrain visualization derived from elevation
 
 Prerequisites:
@@ -2379,10 +2379,12 @@ def download_tc(task_info: TaskInfo) -> DataWithMetadata:
 # =============================================================================
 
 def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
-    """Download satellite imagery (RGB) from NAIP or Sentinel-2.
+    """Download satellite imagery (RGB) from the Sentinel-2 L2A Cloudless Mosaic.
     
-    Attempts to download high-resolution NAIP imagery (1m) for US locations.
-    Falls back to Sentinel-2 (10m) if NAIP is not available.
+    Builds a cloud-free RGB composite from the Copernicus Sentinel-2 Surface
+    Reflectance (L2A) Harmonized collection at 10m native resolution by
+    filtering low-cloud scenes around the fire start date and taking the
+    per-pixel median.
     
     Args:
         task_info: Task configuration with bounds and resolution.
@@ -2390,57 +2392,36 @@ def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
     Returns:
         DataWithMetadata containing RGB satellite imagery as (H, W, 3) array.
     """
-    log.info(f"Downloading satellite imagery for event_id: {task_info.event_id}")
+    log.info(f"Downloading Sentinel-2 L2A cloudless mosaic for event_id: {task_info.event_id}")
     _ensure_ee_initialized()
     
     roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
+    native_res = 10
+    source = "Copernicus Sentinel-2 L2A Cloudless Mosaic"
     
-    # Try NAIP first (US only, 1m resolution)
-    try:
-        # Get NAIP imagery around the fire start date
-        year = task_info.year
-        naip = ee.ImageCollection("USDA/NAIP/DOQQ") \
-            .filterBounds(roi) \
-            .filter(ee.Filter.calendarRange(year - 1, year + 1, 'year')) \
-            .select(['R', 'G', 'B'])
-        
-        if naip.size().getInfo() > 0:
-            log.info("Using NAIP imagery (1m resolution)")
-            image = naip.mosaic()
-            source = "USDA NAIP"
-            native_res = 1
-        else:
-            raise ValueError("No NAIP imagery available")
-            
-    except Exception as e:
-        log.info(f"NAIP not available ({e}), falling back to Sentinel-2")
-        
-        # Fall back to Sentinel-2 (global, 10m resolution)
-        # Get cloud-free imagery around fire start date
-        start_date = task_info.t_start.strftime('%Y-%m-%d')
-        end_date = (task_info.t_start + timedelta(days=180)).strftime('%Y-%m-%d')
-        
+    # Get cloud-free imagery around fire start date
+    start_date = task_info.t_start.strftime('%Y-%m-%d')
+    end_date = (task_info.t_start + timedelta(days=180)).strftime('%Y-%m-%d')
+    
+    s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
+        .filterBounds(roi) \
+        .filterDate(start_date, end_date) \
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) \
+        .select(['B4', 'B3', 'B2'])  # RGB bands
+    
+    if s2.size().getInfo() == 0:
+        # Try a wider date range
+        start_date = f"{task_info.year}-01-01"
+        end_date = f"{task_info.year}-12-31"
         s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
             .filterBounds(roi) \
             .filterDate(start_date, end_date) \
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) \
-            .select(['B4', 'B3', 'B2'])  # RGB bands
-        
-        if s2.size().getInfo() == 0:
-            # Try a wider date range
-            start_date = f"{task_info.year}-01-01"
-            end_date = f"{task_info.year}-12-31"
-            s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") \
-                .filterBounds(roi) \
-                .filterDate(start_date, end_date) \
-                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)) \
-                .select(['B4', 'B3', 'B2'])
-        
-        image = s2.median().rename(['R', 'G', 'B'])
-        # Scale Sentinel-2 values to 0-255 range (divide by 3000 for brighter visualization)
-        image = image.divide(3000).multiply(255).clamp(0, 255)
-        source = "Copernicus Sentinel-2"
-        native_res = 10
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30)) \
+            .select(['B4', 'B3', 'B2'])
+    
+    image = s2.median().rename(['R', 'G', 'B'])
+    # Scale Sentinel-2 values to 0-255 range (divide by 3000 for brighter visualization)
+    image = image.divide(3000).multiply(255).clamp(0, 255)
     
     # Download RGB bands
     rgb_data = []

@@ -14,7 +14,7 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 | Global Building Atlas | Building heights | 3m | `building_height` |
 | ESA WorldCover | Land cover classification | 10m | `landcover` |
 | Tree Canopy LAI | Leaf Area Index | 10m | `lai` |
-| NAIP/Sentinel-2 | Satellite imagery (RGB) | 1m/10m | `satellite` |
+| Sentinel-2 | Satellite imagery (RGB) | 1m/10m | `satellite` |
 | Hillshade | Terrain visualization (from elevation) | 1m | `hillshade` |
 | Global WUI | Wildland-Urban Interface classification | 10m | `wui` |
 
@@ -105,7 +105,7 @@ python main.py --batch CA123,CA456,CA789 [options]
 | `building_height` | Global Building Atlas heights |
 | `landcover` | ESA WorldCover classification |
 | `lai` | Leaf Area Index |
-| `satellite` | RGB satellite imagery (NAIP/Sentinel-2) |
+| `satellite` | RGB satellite imagery Sentinel-2 |
 | `hillshade` | Terrain hillshade visualization |
 | `wui` | Wildland-Urban Interface classification |
 | `hrrr` | Weather data (humidity, wind) |
@@ -160,7 +160,7 @@ output/CA3859812261820171009/
 ├── building_height.npy   # Building heights
 ├── landcover.npy         # Land cover classes
 ├── lai.npy               # Leaf Area Index
-├── satellite.npy         # RGB satellite imagery (NAIP/Sentinel-2)
+├── satellite.npy         # RGB satellite imagery
 ├── hillshade.npy         # Terrain hillshade visualization
 └── wui.npy               # Wildland-Urban Interface classification
 ```
