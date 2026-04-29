@@ -141,8 +141,18 @@ def plot_wui(ax, data, title):
     cbar.ax.tick_params(labelsize=5)  # Smaller font for longer WUI labels
 
 
-def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = False):
-    """Load and plot all data for a fire event."""
+def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = False,
+                    features: list[str] | None = None):
+    """Load and plot all data for a fire event.
+
+    Args:
+        event_id: Fire event ID.
+        output_dir: Directory containing event subfolders.
+        show: Display plot interactively.
+        features: Optional list of layer names to include (e.g.,
+            ['elevation', 'burn_perimeter', 'landcover']). If None, all
+            available layers are plotted.
+    """
     event_path = os.path.join(output_dir, event_id)
     
     if not os.path.exists(event_path):
@@ -161,28 +171,42 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
     # Define colormaps and settings for different data types
     plot_config = {
         'elevation': {'cmap': 'terrain', 'label': 'Elevation (m)'},
-        'burn_perimeters': {'cmap': 'Reds', 'label': 'Burn Perimeter'},
+        'burn_perimeter': {'cmap': 'Reds', 'label': 'Burn Perimeter'},
         'frp': {'cmap': 'hot', 'label': 'Fire Radiative Power (MW)'},
-        'frp_day': {'cmap': 'hot', 'label': 'Daytime FRP (MW)'},
-        'frp_night': {'cmap': 'hot', 'label': 'Nighttime FRP (MW)'},
-        'cbd': {'cmap': 'YlGn', 'label': 'Canopy Bulk Density'},
-        'cc': {'cmap': 'Greens', 'label': 'Canopy Cover (%)'},
+        'frp_daytime': {'cmap': 'hot', 'label': 'Daytime FRP (MW)'},
+        'frp_nighttime': {'cmap': 'hot', 'label': 'Nighttime FRP (MW)'},
+        'canopy_bulk_density': {'cmap': 'YlGn', 'label': 'Canopy Bulk Density'},
+        'canopy_cover': {'cmap': 'Greens', 'label': 'Canopy Cover (%)'},
         'r2': {'cmap': 'Blues', 'label': 'Relative Humidity (%)'},
         'u10': {'cmap': 'coolwarm', 'label': 'Wind U (m/s)'},
         'v10': {'cmap': 'coolwarm', 'label': 'Wind V (m/s)'},
         'building_height': {'cmap': 'plasma', 'label': 'Building Height (m)'},
         'landcover': {'cmap': 'tab20', 'label': 'Land Cover Class'},
         'lai': {'cmap': 'YlGn', 'label': 'LAI (m²/m²)'},
-        'satellite': {'cmap': None, 'label': 'Satellite (RGB)'},
-        'hillshade': {'cmap': 'gray', 'label': 'Hillshade'},
+        'sentinel2_rgb': {'cmap': None, 'label': 'Satellite (RGB)'},
+        'terrain_rgb': {'cmap': None, 'label': 'Terrain (Colored Shaded-Relief)'},
         'wui': {'cmap': 'tab10', 'label': 'Wildland-Urban Interface'},
     }
     
     # Skip task_info and coordinates (not raster layers) for plotting
     data_files = [f for f in npy_files if f not in ('task_info.npy', 'coordinates.npy')]
     
-    # Count extra plots needed for burn_perimeters (first + last timestep)
-    extra_plots = 1 if 'burn_perimeters.npy' in data_files else 0
+    # Optionally filter to a user-specified subset of features
+    if features:
+        requested = [f.strip() for f in features if f.strip()]
+        available = {os.path.splitext(f)[0]: f for f in data_files}
+        missing = [name for name in requested if name not in available]
+        if missing:
+            print(f"Warning: requested features not found for {event_id}: {', '.join(missing)}")
+            print(f"  Available: {', '.join(sorted(available.keys()))}")
+        data_files = [available[name] for name in requested if name in available]
+        if not data_files:
+            print("Error: none of the requested features are available; nothing to plot.")
+            return
+        print(f"Plotting {len(data_files)} selected feature(s): {', '.join(os.path.splitext(f)[0] for f in data_files)}")
+    
+    # Count extra plots needed for burn_perimeter (first + last timestep)
+    extra_plots = 1 if 'burn_perimeter.npy' in data_files else 0
     n_plots = len(data_files) + extra_plots
     
     if n_plots == 0:
@@ -212,8 +236,8 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
         
         # Get the first frame (or only frame for static data)
         if data_obj.data and len(data_obj.data) > 0:
-            # For burn_perimeters, plot both first and last timestep
-            if name == 'burn_perimeters' and len(data_obj.data) > 1:
+            # For burn_perimeter, plot both first and last timestep
+            if name == 'burn_perimeter' and len(data_obj.data) > 1:
                 frames_to_plot = [
                     (0, data_obj.data[0], "First"),
                     (-1, data_obj.data[-1], "Last")
@@ -245,7 +269,7 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
                     else:
                         title += f"\n[Frame 1/{len(data_obj.data)}]"
                 
-                # Handle RGB images (satellite data) - 3D array with shape (H, W, 3)
+                # Handle RGB images (sentinel2_rgb data) - 3D array with shape (H, W, 3)
                 if plot_data.ndim == 3 and plot_data.shape[2] == 3:
                     im = axes[plot_idx].imshow(plot_data)
                     axes[plot_idx].set_title(title, fontsize=10)
@@ -286,7 +310,9 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
     output_fig = os.path.join(event_path, f'{event_id}_overview.png')
     plt.savefig(output_fig, dpi=300, bbox_inches='tight')
     output_pdf = os.path.join(event_path, f'{event_id}_overview.pdf')
-    plt.savefig(output_pdf, bbox_inches='tight')
+    # Use the same DPI for the PDF so embedded raster panels (sentinel2_rgb,
+    # terrain_rgb, etc.) aren't downsampled to the default 100 dpi.
+    plt.savefig(output_pdf, dpi=300, bbox_inches='tight')
     print(f"\nSaved overview plot to: {output_fig}")
     print(f"Saved overview PDF to:  {output_pdf}")
     
@@ -315,12 +341,12 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output',
     
     # Choose colormap based on layer type
     cmap_map = {
-        'burn_perimeters': 'Reds',
+        'burn_perimeter': 'Reds',
         'frp': 'hot',
-        'frp_day': 'hot',
-        'frp_night': 'hot',
+        'frp_daytime': 'hot',
+        'frp_nighttime': 'hot',
         'fireline': 'Reds',
-        'fireline_max': 'hot',
+        'fireline_frp': 'hot',
     }
     cmap = cmap_map.get(layer_name, 'Reds')
     
@@ -403,6 +429,7 @@ def plot_batch(
     output_dir: str = 'output',
     timeseries: str | None = None,
     show: bool = False,
+    features: list[str] | None = None,
 ) -> dict[str, bool]:
     """Plot data for multiple fire events.
     
@@ -429,7 +456,7 @@ def plot_batch(
             if timeseries:
                 plot_time_series(event_id, timeseries, output_dir, show)
             else:
-                plot_event_data(event_id, output_dir, show)
+                plot_event_data(event_id, output_dir, show, features=features)
             results[event_id] = True
             successful += 1
             print(f"✓ Completed: {event_id}")
@@ -479,15 +506,28 @@ def main():
         '-t', '--timeseries',
         type=str,
         default=None,
-        help='Plot time series for specific layer (e.g., burn_perimeters)'
+        help='Plot time series for specific layer (e.g., burn_perimeter)'
     )
     parser.add_argument(
         '-s', '--show',
         action='store_true',
         help='Display the plot interactively (default: only save to file)'
     )
+    parser.add_argument(
+        '-f', '--features',
+        type=str,
+        default=None,
+        help='Comma-separated list of feature/layer names to include in the '
+             'overview plot (e.g., "elevation,burn_perimeter,landcover,wui"). '
+             'Defaults to all available layers. Ignored when --timeseries is used.'
+    )
     
     args = parser.parse_args()
+    
+    features = (
+        [f.strip() for f in args.features.split(',') if f.strip()]
+        if args.features else None
+    )
     
     # Batch mode or single mode
     if args.batch:
@@ -495,7 +535,8 @@ def main():
         if not event_ids:
             print("Error: No valid event IDs found in batch input")
             sys.exit(1)
-        plot_batch(event_ids, args.output_dir, args.timeseries, args.show)
+        plot_batch(event_ids, args.output_dir, args.timeseries, args.show,
+                   features=features)
     else:
         # Single event mode
         event_id = args.event_id
@@ -505,7 +546,7 @@ def main():
         if args.timeseries:
             plot_time_series(event_id, args.timeseries, args.output_dir, args.show)
         else:
-            plot_event_data(event_id, args.output_dir, args.show)
+            plot_event_data(event_id, args.output_dir, args.show, features=features)
 
 
 if __name__ == '__main__':

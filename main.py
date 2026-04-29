@@ -12,7 +12,7 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 - ESA WorldCover: Land cover classification
 - Tree Canopy: Leaf Area Index (LAI)
 - Sentinel-2: Satellite imagery (RGB)
-- Hillshade: Terrain visualization derived from elevation
+- Terrain RGB: Colored shaded-relief visualization derived from elevation
 
 Prerequisites:
     Set your Google Earth Engine project before running:
@@ -569,7 +569,7 @@ def process_feds25mtbs(
         processed_rasters.append(raster)
 
     return DataWithMetadata(
-        name="burn_perimeters",
+        name="burn_perimeter",
         data=processed_rasters,
         timestamps=timestamps,
         source="'FEDS25MTBS; https://doi.org/10.1038/s41597-022-01343-0; requested via SharePoint by Huilin'",
@@ -707,7 +707,7 @@ def process_fireline(
     )
 
 
-def process_fireline_max(
+def process_fireline_frp(
     task_info: TaskInfo,
     fireline_data: DataWithMetadata,
     frp_data: DataWithMetadata,
@@ -724,7 +724,7 @@ def process_fireline_max(
     Args:
         task_info: Task configuration with grid parameters.
         fireline_data: DataWithMetadata from process_fireline (boolean masks).
-        frp_data: DataWithMetadata from process_frp / process_frp_day
+        frp_data: DataWithMetadata from process_frp / process_frp_daytime
                   (FRP rasters in MW).
 
     Returns:
@@ -733,7 +733,7 @@ def process_fireline_max(
     """
     from scipy.ndimage import binary_dilation, label
 
-    log.info(f"Processing fireline_max for event_id: {task_info.event_id}")
+    log.info(f"Processing fireline_frp for event_id: {task_info.event_id}")
 
     fireline_masks = fireline_data.data
     fireline_ts = fireline_data.timestamps or []
@@ -741,9 +741,9 @@ def process_fireline_max(
     frp_ts = frp_data.timestamps or []
 
     if not fireline_masks or not frp_rasters:
-        log.warning("No fireline or FRP data available for fireline_max")
+        log.warning("No fireline or FRP data available for fireline_frp")
         return DataWithMetadata(
-            name="fireline_max",
+            name="fireline_frp",
             data=[],
             timestamps=[],
             source="Derived from fireline + FRP",
@@ -804,10 +804,10 @@ def process_fireline_max(
         result_rasters.append(out)
         result_timestamps.append(fl_time)
 
-    log.info(f"Created {len(result_rasters)} fireline_max frames")
+    log.info(f"Created {len(result_rasters)} fireline_frp frames")
 
     return DataWithMetadata(
-        name="fireline_max",
+        name="fireline_frp",
         data=result_rasters,
         timestamps=result_timestamps,
         source="Derived from fireline + FRP",
@@ -1204,7 +1204,7 @@ def process_frp(
     
     Returns:
         DataWithMetadata containing:
-        - name: "frp", "frp_day", or "frp_night" depending on time_of_day
+        - name: "frp", "frp_daytime", or "frp_nighttime" depending on time_of_day
         - data: List of FRP rasters (numpy arrays) for each time step
         - timestamps: List of datetime objects corresponding to each raster
         - source: Data source used (FIRMS or FEDS25MTBS firepix)
@@ -1213,12 +1213,12 @@ def process_frp(
     """
     # Determine output name and source suffix based on time_of_day
     if time_of_day == 'day':
-        output_name = "frp_day"
+        output_name = "frp_daytime"
         source_suffix = " - Day"
         observation_time = "day (06:00-18:00 UTC)"
         log.info(f"Processing DAYTIME FRP for event: {task_info.event_id}")
     elif time_of_day == 'night':
-        output_name = "frp_night"
+        output_name = "frp_nighttime"
         source_suffix = " - Night"
         observation_time = "night (18:00-06:00 UTC)"
         log.info(f"Processing NIGHTTIME FRP for event: {task_info.event_id}")
@@ -1304,7 +1304,7 @@ def process_frp(
     )
 
 
-def process_frp_day(
+def process_frp_daytime(
     task_info: TaskInfo,
     perimeter_data: DataWithMetadata,
     firms_dir: str = DEFAULT_FIRMS_DIR,
@@ -1333,7 +1333,7 @@ def process_frp_day(
     )
 
 
-def process_frp_night(
+def process_frp_nighttime(
     task_info: TaskInfo,
     perimeter_data: DataWithMetadata,
     firms_dir: str = DEFAULT_FIRMS_DIR,
@@ -1433,7 +1433,7 @@ def interp_shape(
     return out
 
 
-def interpolate_burn_perimeters(
+def interpolate_burn_perimeter(
     data: DataWithMetadata,
     multiplier: int
 ) -> DataWithMetadata:
@@ -1700,7 +1700,7 @@ def download_landfire(task_info: TaskInfo) -> list[DataWithMetadata]:
 
     data = download_gee_task(
         task_info,
-        dataset_name="cbd",
+        dataset_name="canopy_bulk_density",
         band="CBD",
         imagecollection="projects/sat-io/open-datasets/landfire/FUEL/CBD",
         resample='bilinear',
@@ -1714,7 +1714,7 @@ def download_landfire(task_info: TaskInfo) -> list[DataWithMetadata]:
 
     data = download_gee_task(
         task_info,
-        dataset_name="cc",
+        dataset_name="canopy_cover",
         band="CC",
         imagecollection="projects/sat-io/open-datasets/landfire/FUEL/CC",
         resample='bilinear',
@@ -2378,8 +2378,8 @@ def download_tc(task_info: TaskInfo) -> DataWithMetadata:
 # Satellite Imagery Functions
 # =============================================================================
 
-def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
-    """Download satellite imagery (RGB) from the Sentinel-2 L2A Cloudless Mosaic.
+def download_sentinel2_rgb(task_info: TaskInfo) -> DataWithMetadata:
+    """Download sentinel2_rgb imagery (RGB) from the Sentinel-2 L2A Cloudless Mosaic.
     
     Builds a cloud-free RGB composite from the Copernicus Sentinel-2 Surface
     Reflectance (L2A) Harmonized collection at 10m native resolution by
@@ -2390,7 +2390,7 @@ def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
         task_info: Task configuration with bounds and resolution.
     
     Returns:
-        DataWithMetadata containing RGB satellite imagery as (H, W, 3) array.
+        DataWithMetadata containing RGB sentinel2_rgb imagery as (H, W, 3) array.
     """
     log.info(f"Downloading Sentinel-2 L2A cloudless mosaic for event_id: {task_info.event_id}")
     _ensure_ee_initialized()
@@ -2436,16 +2436,16 @@ def download_satellite(task_info: TaskInfo) -> DataWithMetadata:
     # Stack into (H, W, 3) array
     rgb_array = np.stack(rgb_data, axis=-1).astype(np.uint8)
     
-    log.info(f"✓ Downloaded satellite imagery: {rgb_array.shape}")
+    log.info(f"✓ Downloaded sentinel2_rgb imagery: {rgb_array.shape}")
     
     return DataWithMetadata(
-        name="satellite",
+        name="sentinel2_rgb",
         data=[rgb_array],
         timestamps=[task_info.t_start],
         source=source,
         resolution=native_res,
         unit="RGB (0-255)",
-        note={'description': 'True color satellite imagery'},
+        note={'description': 'True color sentinel2_rgb imagery'},
     )
 
 
@@ -2657,52 +2657,111 @@ def download_globalwui(
 
 
 # =============================================================================
-# Hillshade (Terrain Visualization) Functions
+# Terrain RGB (Colored Shaded-Relief) Functions
 # =============================================================================
 
-def download_hillshade(task_info: TaskInfo) -> DataWithMetadata:
-    """Download hillshade terrain visualization from Google Earth Engine.
-    
-    Computes hillshade from elevation data to create a terrain visualization
-    similar to Google Maps terrain view. Hillshade simulates illumination
-    from a light source to show terrain relief.
-    
+# Hypsometric palette used for the terrain RGB layer. Designed to roughly
+# mimic the Google Maps "Terrain" look: low elevations are green, mid
+# elevations transition through tan/brown, and the highest elevations are
+# near-white (snow). Colors are interpolated linearly between min and max.
+_TERRAIN_RGB_PALETTE: list[str] = [
+    '3a8d52',  # low green
+    '6cb27a',
+    'a3c585',
+    'e8e1a8',  # tan
+    'c2a384',
+    '8b6f4e',  # brown
+    'd9d9d9',
+    'ffffff',  # snow
+]
+
+
+def download_terrain_rgb(task_info: TaskInfo) -> DataWithMetadata:
+    """Download a colored shaded-relief terrain visualization (Google-Maps style).
+
+    Combines USGS 3DEP elevation (hypsometric color tint) with a hillshade
+    (multiply blend) to produce an RGB image similar to the Google Maps
+    "Terrain" view. Returns a uint8 array of shape (H, W, 3).
+
     Args:
         task_info: Task configuration with bounds and resolution.
-    
+
     Returns:
-        DataWithMetadata containing hillshade values (0-255).
+        DataWithMetadata containing an RGB array (H, W, 3) of uint8 values.
     """
-    log.info(f"Downloading hillshade for event_id: {task_info.event_id}")
+    log.info(f"Downloading terrain RGB for event_id: {task_info.event_id}")
     _ensure_ee_initialized()
-    
+
     roi = ee.Geometry.Rectangle(task_info.bounds, task_info.crs, False)
-    
-    # Get elevation data
+
     collection = ee.ImageCollection("USGS/3DEP/1m").filterBounds(roi)
-    
     native_proj = collection.first().select('elevation').projection()
-    elevation = collection.mosaic().select('elevation')
-    elevation = elevation.setDefaultProjection(native_proj)
+    elevation = collection.mosaic().select('elevation').setDefaultProjection(native_proj)
     native_res = 1
 
-    # Compute hillshade using ee.Terrain.hillshade
-    # Default azimuth=315 (NW), elevation=45 degrees - standard cartographic lighting
+    # Compute local elevation stretch so the palette uses the full dynamic
+    # range visible in the scene, not the global one.
+    stats = elevation.reduceRegion(
+        reducer=ee.Reducer.minMax(),
+        geometry=roi,
+        scale=max(task_info.resolution, 30),
+        maxPixels=int(1e10),
+        bestEffort=True,
+    ).getInfo() or {}
+    emin = stats.get('elevation_min')
+    emax = stats.get('elevation_max')
+    if emin is None or emax is None or emax <= emin:
+        # Fall back to a sensible default range for very flat areas.
+        emin = float(emin) if emin is not None else 0.0
+        emax = emin + 1.0
+    log.info(f"Terrain RGB elevation stretch: [{emin:.1f}, {emax:.1f}] m")
+
+    # Hypsometric tint: visualize() produces a 3-band uint8 RGB image.
+    tint = elevation.visualize(
+        min=float(emin),
+        max=float(emax),
+        palette=_TERRAIN_RGB_PALETTE,
+    )
+
+    # Standard cartographic lighting (azimuth=315° NW, sun elevation=45°).
     hillshade = ee.Terrain.hillshade(elevation, azimuth=315, elevation=45)
-    hillshade = hillshade.resample('bilinear').rename('hillshade')
-    
-    data_array = _download_processed_image(hillshade, task_info, 'hillshade')
-    
-    log.info("✓ Downloaded hillshade data")
-    
+
+    # Multiply blend: shaded = tint * (hillshade / 255). Done per-band so the
+    # output stays a 3-band uint8 image.
+    shade = hillshade.divide(255.0)
+    shaded = tint.multiply(shade).clamp(0, 255).rename(['R', 'G', 'B'])
+    shaded = shaded.resample('bilinear')
+
+    rgb_data = []
+    for band in ['R', 'G', 'B']:
+        band_image = shaded.select(band).reproject(
+            crs=task_info.crs,
+            scale=task_info.resolution,
+        )
+        data_array = _download_processed_image(band_image, task_info, band)
+        rgb_data.append(data_array)
+
+    rgb_array = np.stack(rgb_data, axis=-1).clip(0, 255).astype(np.uint8)
+
+    log.info(f"✓ Downloaded terrain RGB: {rgb_array.shape}")
+
     return DataWithMetadata(
-        name="hillshade",
-        data=[data_array.astype(np.uint8)],
+        name="terrain_rgb",
+        data=[rgb_array],
         timestamps=[task_info.t_start],
         source="Computed from USGS 3DEP via Google Earth Engine",
         resolution=native_res,
-        unit="0-255",
-        note={'description': 'Terrain hillshade visualization (azimuth=315°, elevation=45°)'},
+        unit="RGB (0-255)",
+        note={
+            'description': (
+                'Colored shaded-relief (hypsometric tint × hillshade), '
+                'Google-Maps terrain style'
+            ),
+            'elevation_stretch_m': [float(emin), float(emax)],
+            'hillshade_azimuth_deg': 315,
+            'hillshade_elevation_deg': 45,
+            'palette': _TERRAIN_RGB_PALETTE,
+        },
     )
 
 
@@ -2766,7 +2825,7 @@ def process_single_fire(
             log.info(f"  Only processing: {args.only}")
         
         # Process FEDS25MTBS (always needed for FRP, so process if any FRP is requested)
-        needs_perimeters = should_process("burn_perimeters") or should_process("frp_day") or should_process("frp_night") or should_process("fireline_max")
+        needs_perimeters = should_process("burn_perimeter") or should_process("frp_daytime") or should_process("frp_nighttime") or should_process("fireline_frp")
         feds25mtbs = None
         
         if needs_perimeters:
@@ -2775,17 +2834,17 @@ def process_single_fire(
             
             if args.interpolation > 0:
                 log.info(f"Interpolating burn perimeters with multiplier: {args.interpolation}")
-                feds25mtbs = interpolate_burn_perimeters(feds25mtbs, multiplier=args.interpolation)
+                feds25mtbs = interpolate_burn_perimeter(feds25mtbs, multiplier=args.interpolation)
                 log.debug(f"Interpolated FEDS25MTBS data: {feds25mtbs}")
             
-            if should_process("burn_perimeters"):
+            if should_process("burn_perimeter"):
                 save_numpy(task_info, feds25mtbs, args.output_dir)
-                results_status["burn_perimeters"] = True
+                results_status["burn_perimeter"] = True
         else:
-            log.info("⏭️ Skipping burn_perimeters (not in --only)")
+            log.info("⏭️ Skipping burn_perimeter (not in --only)")
 
-        # Process fireline (also needed for fireline_max)
-        needs_fireline = should_process("fireline") or should_process("fireline_max")
+        # Process fireline (also needed for fireline_frp)
+        needs_fireline = should_process("fireline") or should_process("fireline_frp")
         fireline = None
 
         if needs_fireline:
@@ -2798,38 +2857,38 @@ def process_single_fire(
         else:
             log.info("⏭️ Skipping fireline (not in --only)")
 
-        # Process FRP (also needed for fireline_max)
-        needs_frp_day = should_process("frp_day") or should_process("fireline_max")
-        frp_day = None
+        # Process FRP (also needed for fireline_frp)
+        needs_frp_daytime = should_process("frp_daytime") or should_process("fireline_frp")
+        frp_daytime = None
 
-        if needs_frp_day:
+        if needs_frp_daytime:
             log.info("Processing FRP (Fire Radiative Power) day data...")
-            frp_day = process_frp_day(task_info, feds25mtbs)
-            if should_process("frp_day"):
-                save_numpy(task_info, frp_day, args.output_dir)
-                log.info(f"✓ Saved frp_day.npy ({len(frp_day.data)} time steps)")
-            results_status["frp_day"] = True
+            frp_daytime = process_frp_daytime(task_info, feds25mtbs)
+            if should_process("frp_daytime"):
+                save_numpy(task_info, frp_daytime, args.output_dir)
+                log.info(f"✓ Saved frp_daytime.npy ({len(frp_daytime.data)} time steps)")
+            results_status["frp_daytime"] = True
         else:
-            log.info("⏭️ Skipping frp_day (not in --only)")
+            log.info("⏭️ Skipping frp_daytime (not in --only)")
         
-        if should_process("frp_night"):
+        if should_process("frp_nighttime"):
             log.info("Processing FRP (Fire Radiative Power) night data...")
-            frp_night = process_frp_night(task_info, feds25mtbs)
-            save_numpy(task_info, frp_night, args.output_dir)
-            log.info(f"✓ Saved frp_night.npy ({len(frp_night.data)} time steps)")
-            results_status["frp_night"] = True
+            frp_nighttime = process_frp_nighttime(task_info, feds25mtbs)
+            save_numpy(task_info, frp_nighttime, args.output_dir)
+            log.info(f"✓ Saved frp_nighttime.npy ({len(frp_nighttime.data)} time steps)")
+            results_status["frp_nighttime"] = True
         else:
-            log.info("⏭️ Skipping frp_night (not in --only)")
+            log.info("⏭️ Skipping frp_nighttime (not in --only)")
 
-        # Process fireline_max (requires fireline + FRP day data)
-        if should_process("fireline_max"):
-            log.info("Processing fireline_max data...")
-            fireline_max = process_fireline_max(task_info, fireline, frp_day)
-            save_numpy(task_info, fireline_max, args.output_dir)
-            log.info(f"✓ Saved fireline_max.npy ({len(fireline_max.data)} time steps)")
-            results_status["fireline_max"] = True
+        # Process fireline_frp (requires fireline + FRP day data)
+        if should_process("fireline_frp"):
+            log.info("Processing fireline_frp data...")
+            fireline_frp = process_fireline_frp(task_info, fireline, frp_daytime)
+            save_numpy(task_info, fireline_frp, args.output_dir)
+            log.info(f"✓ Saved fireline_frp.npy ({len(fireline_frp.data)} time steps)")
+            results_status["fireline_frp"] = True
         else:
-            log.info("⏭️ Skipping fireline_max (not in --only)")
+            log.info("⏭️ Skipping fireline_frp (not in --only)")
 
         # Parallel Downloads (GEE-based datasets)
         all_gee_tasks: list[tuple[str, Callable, tuple]] = [
@@ -2838,8 +2897,8 @@ def process_single_fire(
             ("building_height", download_building_height, (task_info,)),
             ("landcover", download_eca, (task_info,)),
             ("lai", download_tc, (task_info,)),
-            ("satellite", download_satellite, (task_info,)),
-            ("hillshade", download_hillshade, (task_info,)),
+            ("sentinel2_rgb", download_sentinel2_rgb, (task_info,)),
+            ("terrain_rgb", download_terrain_rgb, (task_info,)),
             ("wui", download_globalwui, (task_info,)),
         ]
         
@@ -2893,7 +2952,7 @@ def process_single_fire(
                 failed_tasks = still_failed
             
             # Save successful results
-            for name in ["elevation", "building_height", "landcover", "lai", "satellite", "hillshade", "wui"]:
+            for name in ["elevation", "building_height", "landcover", "lai", "sentinel2_rgb", "terrain_rgb", "wui"]:
                 if name in results and not isinstance(results[name], Exception):
                     data = results[name]
                     log.debug(f"Downloaded {name} data: {data}")
@@ -3142,8 +3201,8 @@ def main() -> None:
         type=str,
         default=None,
         help="Only process specific feature(s). Comma-separated list. "
-             "Available: burn_perimeters, fireline, fireline_max, frp_day, frp_night, elevation, landfire, "
-             "building_height, landcover, lai, satellite, hillshade, wui, hrrr"
+             "Available: burn_perimeter, fireline, fireline_frp, frp_daytime, frp_nighttime, elevation, landfire, "
+             "building_height, landcover, lai, sentinel2_rgb, terrain_rgb, wui, hrrr"
     )
 
     args = parser.parse_args()

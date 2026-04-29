@@ -6,17 +6,17 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 
 | Dataset | Description | Resolution | Feature Name(s) |
 |---------|-------------|------------|-----------------|
-| FEDS25MTBS | Fire perimeter time series | 375m | `burn_perimeters`, `fireline`, `fireline_max` |
-| Fire Radiative Power (FRP) | Fire intensity from VIIRS (day/night) | 375m | `frp_day`, `frp_night` |
-| USGS 3DEP | Elevation | 1m | `elevation` |
-| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m | `cbd`, `cc` |
+| FEDS25MTBS (MTBS-constrained FEDS 2.5) | Fire perimeters, firelines, and pre-2024 active-fire pixels | 375m | `burn_perimeter`, `fireline`, `frp_daytime`/`frp_nighttime` (<2024) |
+| NASA FIRMS (VIIRS) | Active-fire FRP for events from 2024 onwards | 375m | `frp_daytime`, `frp_nighttime` (≥2024) |
+| *Derived from `fireline` + FRP* | Per-segment max FRP painted onto fireline pixels | — | `fireline_frp` |
+| USGS 3DEP | Elevation and colored shaded-relief visualization | 1m | `elevation`, `terrain_rgb` |
+| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m | `canopy_bulk_density`, `canopy_cover` |
 | HRRR | Weather: humidity (r2), wind (u10, v10) | 3km | `r2`, `u10`, `v10` |
 | Global Building Atlas | Building heights | 3m | `building_height` |
-| ESA WorldCover | Land cover classification | 10m | `landcover` |
-| Tree Canopy LAI | Leaf Area Index | 10m | `lai` |
-| Sentinel-2 | Satellite imagery (RGB) | 1m/10m | `satellite` |
-| Hillshade | Terrain visualization (from elevation) | 1m | `hillshade` |
-| Global WUI | Wildland-Urban Interface classification | 10m | `wui` |
+| ESA WorldCover v200 | Land cover classification | 10m | `landcover` |
+| LAI | Leaf Area Index (single 2020-07-02 snapshot) | 10m | `lai` |
+| Sentinel-2 L2A Cloudless Mosaic | Satellite imagery (RGB) | 10m | `sentinel2_rgb` |
+| Global WUI (Schug et al. 2023) | Wildland-Urban Interface classification | 10m | `wui` |
 
 ## Installation
 
@@ -95,18 +95,18 @@ python main.py --batch CA123,CA456,CA789 [options]
 
 | Feature | Description |
 |---------|-------------|
-| `burn_perimeters` | Fire perimeter time series from FEDS25MTBS |
+| `burn_perimeter` | Fire perimeter time series from FEDS25MTBS |
 | `fireline` | Active fireline derived from consecutive perimeter differences |
-| `fireline_max` | Per-pixel maximum FRP along the fireline |
-| `frp_day` | Daytime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
-| `frp_night` | Nighttime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
+| `fireline_frp` | Per-pixel maximum FRP along the fireline |
+| `frp_daytime` | Daytime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
+| `frp_nighttime` | Nighttime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
 | `elevation` | USGS 3DEP elevation |
 | `landfire` | LANDFIRE CBD and Canopy Cover |
 | `building_height` | Global Building Atlas heights |
 | `landcover` | ESA WorldCover classification |
 | `lai` | Leaf Area Index |
-| `satellite` | RGB satellite imagery Sentinel-2 |
-| `hillshade` | Terrain hillshade visualization |
+| `sentinel2_rgb` | RGB sentinel2_rgb imagery Sentinel-2 |
+| `terrain_rgb` | Colored shaded-relief terrain (Google-Maps style, RGB) |
 | `wui` | Wildland-Urban Interface classification |
 | `hrrr` | Weather data (humidity, wind) |
 
@@ -129,10 +129,10 @@ python main.py --batch events.txt -w 4 -o results/
 python main.py --batch CA123,CA456,CA789 --workers 3
 
 # Process only a single feature (for quick debugging)
-python main.py CA3859812261820171009 --only frp_day
+python main.py CA3859812261820171009 --only frp_daytime
 
 # Process multiple specific features
-python main.py CA3859812261820171009 --only frp_day,frp_night,elevation
+python main.py CA3859812261820171009 --only frp_daytime,frp_nighttime,elevation
 
 # Regenerate only weather data
 python main.py CA3859812261820171009 --only hrrr
@@ -148,20 +148,20 @@ Data is saved as `.npy` files in `output/<event_id>/`:
 output/CA3859812261820171009/
 ├── task_info.npy         # Processing configuration
 ├── coordinates.npy       # Pixel-center x/y coordinates + CRS for the grid
-├── burn_perimeters.npy   # Fire perimeter time series
-├── frp_day.npy           # Daytime Fire Radiative Power (MW)
-├── frp_night.npy         # Nighttime Fire Radiative Power (MW)
+├── burn_perimeter.npy   # Fire perimeter time series
+├── frp_daytime.npy           # Daytime Fire Radiative Power (MW)
+├── frp_nighttime.npy         # Nighttime Fire Radiative Power (MW)
 ├── elevation.npy         # Terrain elevation
-├── cbd.npy               # Canopy Bulk Density
-├── cc.npy                # Canopy Cover
+├── canopy_bulk_density.npy               # Canopy Bulk Density
+├── canopy_cover.npy                # Canopy Cover
 ├── r2.npy                # Relative humidity
 ├── u10.npy               # Wind U component
 ├── v10.npy               # Wind V component
 ├── building_height.npy   # Building heights
 ├── landcover.npy         # Land cover classes
 ├── lai.npy               # Leaf Area Index
-├── satellite.npy         # RGB satellite imagery
-├── hillshade.npy         # Terrain hillshade visualization
+├── sentinel2_rgb.npy         # RGB sentinel2_rgb imagery
+├── terrain_rgb.npy       # Colored shaded-relief terrain RGB (H, W, 3)
 └── wui.npy               # Wildland-Urban Interface classification
 ```
 
@@ -206,7 +206,7 @@ python plot_data.py CA3859812261820171009
 python plot_data.py CA3859812261820171009 --show
 
 # Plot time series frames (e.g., burn perimeters)
-python plot_data.py CA3859812261820171009 -t burn_perimeters
+python plot_data.py CA3859812261820171009 -t burn_perimeter
 
 # Batch plot multiple events
 python plot_data.py --batch events.txt
@@ -248,11 +248,11 @@ Fire events are listed in `datasets/FEDS25MTBS/fireslist2012-2023.csv`. Event ID
 
 ## FEDS25MTBS Dataset
 
-The Fire Event Data Suite (FEDS) provides half-daily fire perimeter time series derived from VIIRS satellite observations using an object-based tracking system.
+The Fire Event Data Suite (FEDS) provides half-daily fire perimeter time series derived from VIIRS sentinel2_rgb observations using an object-based tracking system.
 
 ### Data Source
 
-- **Publication**: Balch, J.K. et al. (2022). California wildfire spread derived using VIIRS satellite observations and an object-based tracking system. *Scientific Data*. https://doi.org/10.1038/s41597-022-01343-0
+- **Publication**: Balch, J.K. et al. (2022). California wildfire spread derived using VIIRS sentinel2_rgb observations and an object-based tracking system. *Scientific Data*. https://doi.org/10.1038/s41597-022-01343-0
 - **Data Repository**: [figshare](https://figshare.com/) (public data for 2012-2020)
 - **Extended Data**: Our dataset (2012-2023) was accessed via request to the authors
 - **Temporal Coverage**: 2012-2023 fire seasons

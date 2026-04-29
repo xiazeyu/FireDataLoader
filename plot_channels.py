@@ -25,23 +25,23 @@ from plot_data import (
 # Same plot config as plot_data.py
 PLOT_CONFIG = {
     'elevation': {'cmap': 'terrain', 'label': 'Elevation (m)'},
-    'burn_perimeters': {'cmap': 'Reds', 'label': 'Burn Perimeter'},
+    'burn_perimeter': {'cmap': 'Reds', 'label': 'Burn Perimeter'},
     'frp': {'cmap': 'hot', 'label': 'Fire Radiative Power (MW)'},
-    'frp_day': {'cmap': 'hot', 'label': 'Daytime FRP (MW)'},
-    'frp_night': {'cmap': 'hot', 'label': 'Nighttime FRP (MW)'},
-    'cbd': {'cmap': 'YlGn', 'label': 'Canopy Bulk Density'},
-    'cc': {'cmap': 'Greens', 'label': 'Canopy Cover (%)'},
+    'frp_daytime': {'cmap': 'hot', 'label': 'Daytime FRP (MW)'},
+    'frp_nighttime': {'cmap': 'hot', 'label': 'Nighttime FRP (MW)'},
+    'canopy_bulk_density': {'cmap': 'YlGn', 'label': 'Canopy Bulk Density'},
+    'canopy_cover': {'cmap': 'Greens', 'label': 'Canopy Cover (%)'},
     'r2': {'cmap': 'Blues', 'label': 'Relative Humidity (%)'},
     'u10': {'cmap': 'coolwarm', 'label': 'Wind U (m/s)'},
     'v10': {'cmap': 'coolwarm', 'label': 'Wind V (m/s)'},
     'building_height': {'cmap': 'plasma', 'label': 'Building Height (m)'},
     'landcover': {'cmap': 'tab20', 'label': 'Land Cover Class'},
     'lai': {'cmap': 'YlGn', 'label': 'LAI (m²/m²)'},
-    'satellite': {'cmap': None, 'label': 'Satellite (RGB)'},
-    'hillshade': {'cmap': 'gray', 'label': 'Hillshade'},
+    'sentinel2_rgb': {'cmap': None, 'label': 'Satellite (RGB)'},
+    'terrain_rgb': {'cmap': None, 'label': 'Terrain (Colored Shaded-Relief)'},
     'wui': {'cmap': 'tab10', 'label': 'Wildland-Urban Interface'},
     'fireline': {'cmap': 'hot', 'label': 'Fireline Intensity'},
-    'fireline_max': {'cmap': 'hot', 'label': 'Fireline Max Intensity'},
+    'fireline_frp': {'cmap': 'hot', 'label': 'Fireline Max Intensity'},
 }
 
 
@@ -52,8 +52,8 @@ def plot_channel(event_id: str, data_obj, name: str, event_path: str):
     if not data_obj.data or len(data_obj.data) == 0:
         return
 
-    # For burn_perimeters, plot first and last frame side by side
-    if name == 'burn_perimeters' and len(data_obj.data) > 1:
+    # For burn_perimeter, plot first and last frame side by side
+    if name == 'burn_perimeter' and len(data_obj.data) > 1:
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
         fig.suptitle(f'{event_id} — {config["label"]}', fontsize=13, fontweight='bold')
 
