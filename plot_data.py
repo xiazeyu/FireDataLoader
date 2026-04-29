@@ -285,7 +285,10 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
     # Save figure
     output_fig = os.path.join(event_path, f'{event_id}_overview.png')
     plt.savefig(output_fig, dpi=300, bbox_inches='tight')
+    output_pdf = os.path.join(event_path, f'{event_id}_overview.pdf')
+    plt.savefig(output_pdf, bbox_inches='tight')
     print(f"\nSaved overview plot to: {output_fig}")
+    print(f"Saved overview PDF to:  {output_pdf}")
     
     if show:
         plt.show()
