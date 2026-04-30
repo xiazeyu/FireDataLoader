@@ -346,7 +346,7 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output',
         'frp_daytime': 'hot',
         'frp_nighttime': 'hot',
         'fireline': 'Reds',
-        'fireline_frp': 'hot',
+        'fireline_max_frp': 'hot',
     }
     cmap = cmap_map.get(layer_name, 'Reds')
     

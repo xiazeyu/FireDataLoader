@@ -707,7 +707,7 @@ def process_fireline(
     )
 
 
-def process_fireline_frp(
+def process_fireline_max_frp(
     task_info: TaskInfo,
     fireline_data: DataWithMetadata,
     frp_data: DataWithMetadata,
@@ -733,7 +733,7 @@ def process_fireline_frp(
     """
     from scipy.ndimage import binary_dilation, label
 
-    log.info(f"Processing fireline_frp for event_id: {task_info.event_id}")
+    log.info(f"Processing fireline_max_frp for event_id: {task_info.event_id}")
 
     fireline_masks = fireline_data.data
     fireline_ts = fireline_data.timestamps or []
@@ -741,9 +741,9 @@ def process_fireline_frp(
     frp_ts = frp_data.timestamps or []
 
     if not fireline_masks or not frp_rasters:
-        log.warning("No fireline or FRP data available for fireline_frp")
+        log.warning("No fireline or FRP data available for fireline_max_frp")
         return DataWithMetadata(
-            name="fireline_frp",
+            name="fireline_max_frp",
             data=[],
             timestamps=[],
             source="Derived from fireline + FRP",
@@ -804,10 +804,10 @@ def process_fireline_frp(
         result_rasters.append(out)
         result_timestamps.append(fl_time)
 
-    log.info(f"Created {len(result_rasters)} fireline_frp frames")
+    log.info(f"Created {len(result_rasters)} fireline_max_frp frames")
 
     return DataWithMetadata(
-        name="fireline_frp",
+        name="fireline_max_frp",
         data=result_rasters,
         timestamps=result_timestamps,
         source="Derived from fireline + FRP",
@@ -2825,7 +2825,7 @@ def process_single_fire(
             log.info(f"  Only processing: {args.only}")
         
         # Process FEDS25MTBS (always needed for FRP, so process if any FRP is requested)
-        needs_perimeters = should_process("burn_perimeter") or should_process("frp_daytime") or should_process("frp_nighttime") or should_process("fireline_frp")
+        needs_perimeters = should_process("burn_perimeter") or should_process("frp_daytime") or should_process("frp_nighttime") or should_process("fireline_max_frp")
         feds25mtbs = None
         
         if needs_perimeters:
@@ -2843,8 +2843,8 @@ def process_single_fire(
         else:
             log.info("⏭️ Skipping burn_perimeter (not in --only)")
 
-        # Process fireline (also needed for fireline_frp)
-        needs_fireline = should_process("fireline") or should_process("fireline_frp")
+        # Process fireline (also needed for fireline_max_frp)
+        needs_fireline = should_process("fireline") or should_process("fireline_max_frp")
         fireline = None
 
         if needs_fireline:
@@ -2857,8 +2857,8 @@ def process_single_fire(
         else:
             log.info("⏭️ Skipping fireline (not in --only)")
 
-        # Process FRP (also needed for fireline_frp)
-        needs_frp_daytime = should_process("frp_daytime") or should_process("fireline_frp")
+        # Process FRP (also needed for fireline_max_frp)
+        needs_frp_daytime = should_process("frp_daytime") or should_process("fireline_max_frp")
         frp_daytime = None
 
         if needs_frp_daytime:
@@ -2880,15 +2880,15 @@ def process_single_fire(
         else:
             log.info("⏭️ Skipping frp_nighttime (not in --only)")
 
-        # Process fireline_frp (requires fireline + FRP day data)
-        if should_process("fireline_frp"):
-            log.info("Processing fireline_frp data...")
-            fireline_frp = process_fireline_frp(task_info, fireline, frp_daytime)
-            save_numpy(task_info, fireline_frp, args.output_dir)
-            log.info(f"✓ Saved fireline_frp.npy ({len(fireline_frp.data)} time steps)")
-            results_status["fireline_frp"] = True
+        # Process fireline_max_frp (requires fireline + FRP day data)
+        if should_process("fireline_max_frp"):
+            log.info("Processing fireline_max_frp data...")
+            fireline_max_frp = process_fireline_max_frp(task_info, fireline, frp_daytime)
+            save_numpy(task_info, fireline_max_frp, args.output_dir)
+            log.info(f"✓ Saved fireline_max_frp.npy ({len(fireline_max_frp.data)} time steps)")
+            results_status["fireline_max_frp"] = True
         else:
-            log.info("⏭️ Skipping fireline_frp (not in --only)")
+            log.info("⏭️ Skipping fireline_max_frp (not in --only)")
 
         # Parallel Downloads (GEE-based datasets)
         all_gee_tasks: list[tuple[str, Callable, tuple]] = [
@@ -3201,7 +3201,7 @@ def main() -> None:
         type=str,
         default=None,
         help="Only process specific feature(s). Comma-separated list. "
-             "Available: burn_perimeter, fireline, fireline_frp, frp_daytime, frp_nighttime, elevation, landfire, "
+             "Available: burn_perimeter, fireline, fireline_max_frp, frp_daytime, frp_nighttime, elevation, landfire, "
              "building_height, landcover, lai, sentinel2_rgb, terrain_rgb, wui, hrrr"
     )
 

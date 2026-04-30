@@ -41,7 +41,7 @@ PLOT_CONFIG = {
     'terrain_rgb': {'cmap': None, 'label': 'Terrain (Colored Shaded-Relief)'},
     'wui': {'cmap': 'tab10', 'label': 'Wildland-Urban Interface'},
     'fireline': {'cmap': 'hot', 'label': 'Fireline Intensity'},
-    'fireline_frp': {'cmap': 'hot', 'label': 'Fireline Max Intensity'},
+    'fireline_max_frp': {'cmap': 'hot', 'label': 'Fireline Max Intensity'},
 }
 
 
