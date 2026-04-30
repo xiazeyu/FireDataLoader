@@ -6,17 +6,17 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 
 | Dataset | Description | Resolution | Feature Name(s) |
 |---------|-------------|------------|-----------------|
-| FEDS | Fire perimeters, firelines, and pre-2024 active-fire pixels | 375m | `burn_perimeter`, `fireline`, `frp_daytime`/`frp_nighttime` (<2024) |
-| NASA FIRMS (VIIRS) | Active-fire FRP for events from 2024 onwards | 375m | `frp_daytime`, `frp_nighttime` (≥2024) |
-| *Derived from `fireline` + FRP* | Per-segment max FRP painted onto fireline pixels | — | `fireline_max_frp` |
-| USGS 3DEP | Elevation and colored shaded-relief visualization | 1m | `elevation`, `terrain_rgb` |
-| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m | `canopy_bulk_density`, `canopy_cover` |
-| HRRR | Weather: humidity (r2), wind (u10, v10) | 3km | `r2`, `u10`, `v10` |
-| Global Building Atlas | Building heights | 3m | `building_height` |
-| ESA WorldCover v200 | Land cover classification | 10m | `landcover` |
-| LAI | Leaf Area Index (single 2020-07-02 snapshot) | 10m | `lai` |
-| Sentinel-2 L2A Cloudless Mosaic | Satellite imagery (RGB) | 10m | `sentinel2_rgb` |
-| Global WUI (Schug et al. 2023) | Wildland-Urban Interface classification | 10m | `wui` |
+| Fire Events Data Suite (FEDS) | Dynamic fire perimeters and firelines | 375m, every 12 hours | `burn_perimeter`, `fireline` |
+| VIIRS FRP | FRP from fire hotspot location  | 375m, various time | `frp_daytime`, `frp_nighttime` |
+| *Derived from FEDS + VIIRS FRP* | Per-segment max FRP painted onto fireline pixels | 375m, every 12 hours | `fireline_max_frp` |
+| USGS 3DEP | Elevation and colored shaded-relief visualization | 1m, constant | `elevation`, `terrain_rgb` |
+| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m, constant | `canopy_bulk_density`, `canopy_cover` |
+| HRRR | Weather: humidity (r2), wind (u10, v10) | 3km, every 1 hour | `r2`, `u10`, `v10` |
+| Global Building Atlas | Building heights | 3m, constant | `building_height` |
+| ESA WorldCover | Land cover classification | 10m, constant | `landcover` |
+| LAI (Cheng et al., from Sentinel-2) | Leaf Area Index (single 2020-07-02 snapshot) | 10m, constant | `lai` |
+| Sentinel-2 L2A Cloudless Mosaic | Satellite imagery (RGB) | 10m, constant | `sentinel2_rgb` |
+| Global WUI  (Schug et al. 2023) | Wildland-Urban Interface classification | 10m, constant | `wui` |
 
 ## Installation
 
@@ -95,11 +95,11 @@ python main.py --batch CA123,CA456,CA789 [options]
 
 | Feature | Description |
 |---------|-------------|
-| `burn_perimeter` | Fire perimeter time series from FEDS25MTBS |
+| `burn_perimeter` | Fire perimeter time series from FEDS |
 | `fireline` | Active fireline derived from consecutive perimeter differences |
 | `fireline_max_frp` | Per-pixel maximum FRP along the fireline |
-| `frp_daytime` | Daytime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
-| `frp_nighttime` | Nighttime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
+| `frp_daytime` | Daytime Fire Radiative Power FEDS |
+| `frp_nighttime` | Nighttime Fire Radiative Power FEDS |
 | `elevation` | USGS 3DEP elevation |
 | `landfire` | LANDFIRE CBD and Canopy Cover |
 | `building_height` | Global Building Atlas heights |
@@ -252,7 +252,7 @@ matched MTBS Event ID as the canonical key. The ID follows the pattern
 
 ## FEDS25MTBS Dataset
 
-The Fire Event Data Suite (FEDS) provides half-daily fire perimeter time series derived from VIIRS sentinel2_rgb observations using an object-based tracking system.
+FEDS 2.5 derives fire perimeters and firelines (every 12 hours) from VIIRS active-fire hotspots via object-based tracking, constrained to MTBS burn records.
 
 ### Data Source
 
