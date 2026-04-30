@@ -1,4 +1,4 @@
-# FireDataLoader
+# FireDataForge
 
 A tool for downloading and processing wildfire-related geospatial data from multiple sources for machine learning and analysis.
 
@@ -6,9 +6,9 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 
 | Dataset | Description | Resolution | Feature Name(s) |
 |---------|-------------|------------|-----------------|
-| FEDS25MTBS (MTBS-constrained FEDS 2.5) | Fire perimeters, firelines, and pre-2024 active-fire pixels | 375m | `burn_perimeter`, `fireline`, `frp_daytime`/`frp_nighttime` (<2024) |
+| FEDS | Fire perimeters, firelines, and pre-2024 active-fire pixels | 375m | `burn_perimeter`, `fireline`, `frp_daytime`/`frp_nighttime` (<2024) |
 | NASA FIRMS (VIIRS) | Active-fire FRP for events from 2024 onwards | 375m | `frp_daytime`, `frp_nighttime` (≥2024) |
-| *Derived from `fireline` + FRP* | Per-segment max FRP painted onto fireline pixels | — | `fireline_frp` |
+| *Derived from `fireline` + FRP* | Per-segment max FRP painted onto fireline pixels | — | `fireline_max_frp` |
 | USGS 3DEP | Elevation and colored shaded-relief visualization | 1m | `elevation`, `terrain_rgb` |
 | LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m | `canopy_bulk_density`, `canopy_cover` |
 | HRRR | Weather: humidity (r2), wind (u10, v10) | 3km | `r2`, `u10`, `v10` |
@@ -97,7 +97,7 @@ python main.py --batch CA123,CA456,CA789 [options]
 |---------|-------------|
 | `burn_perimeter` | Fire perimeter time series from FEDS25MTBS |
 | `fireline` | Active fireline derived from consecutive perimeter differences |
-| `fireline_frp` | Per-pixel maximum FRP along the fireline |
+| `fireline_max_frp` | Per-pixel maximum FRP along the fireline |
 | `frp_daytime` | Daytime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
 | `frp_nighttime` | Nighttime Fire Radiative Power (FIRMS ≥2024 / FEDS25MTBS firepix <2024) |
 | `elevation` | USGS 3DEP elevation |
@@ -244,7 +244,11 @@ print(f"Grid: {task.shape}, CRS: {task.crs}")
 
 ## Available Fire Events
 
-Fire events are listed in `datasets/FEDS25MTBS/fireslist2012-2023.csv`. Event IDs follow the pattern: `{STATE}{LAT}{LON}{DATE}` (e.g., `CA3859812261820171009`).
+Fire events are listed in `datasets/FEDS25MTBS/fireslist2012-2023.csv`. The
+`Event_ID` column is the **MTBS Event ID** (Monitoring Trends in Burn
+Severity); FEDS 2.5 is MTBS-constrained, so each FEDS event reuses its
+matched MTBS Event ID as the canonical key. The ID follows the pattern
+`{STATE}{LAT}{LON}{DATE}` (e.g., `CA3859812261820171009`).
 
 ## FEDS25MTBS Dataset
 
@@ -278,7 +282,9 @@ Each `.gpkg` file contains the `perimeter` layer with fire boundary polygons at 
 
 ### Event ID Format
 
-Event IDs follow the pattern: `{STATE}{LAT}{LON}{DATE}`
+FEDS25MTBS reuses the **MTBS Event ID** as its canonical event key, so the
+same identifier addresses both the MTBS burn record and the FEDS25MTBS
+perimeter time series. The ID follows the pattern `{STATE}{LAT}{LON}{DATE}`:
 - **STATE**: 2-letter state code (e.g., `CA`)
 - **LAT**: Latitude × 100 (5 digits, e.g., `38598` for 38.598°)
 - **LON**: Longitude × 100 (5 digits, e.g., `12261` for -122.61°)
