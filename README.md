@@ -4,19 +4,19 @@ A tool for downloading and processing wildfire-related geospatial data from mult
 
 ## Data Sources
 
-| Dataset | Description | Resolution | Feature Name(s) |
-|---------|-------------|------------|-----------------|
-| Fire Events Data Suite (FEDS) | Dynamic fire perimeters and firelines | 375m, every 12 hours | `burn_perimeter`, `fireline` |
-| VIIRS FRP | FRP from fire hotspot location  | 375m, various time | `frp_daytime`, `frp_nighttime` |
-| *Derived from FEDS + VIIRS FRP* | Per-segment max FRP painted onto fireline pixels | 375m, every 12 hours | `fireline_max_frp` |
-| USGS 3DEP | Elevation and colored shaded-relief visualization | 1m, constant | `elevation`, `terrain_rgb` |
-| LANDFIRE | Canopy Bulk Density (CBD), Canopy Cover (CC) | 30m, constant | `canopy_bulk_density`, `canopy_cover` |
-| HRRR | Weather: humidity (r2), wind (u10, v10) | 3km, every 1 hour | `r2`, `u10`, `v10` |
-| Global Building Atlas | Building heights | 3m, constant | `building_height` |
-| ESA WorldCover | Land cover classification | 10m, constant | `landcover` |
-| LAI (Cheng et al., from Sentinel-2) | Leaf Area Index (single 2020-07-02 snapshot) | 10m, constant | `lai` |
-| Sentinel-2 L2A Cloudless Mosaic | Satellite imagery (RGB) | 10m, constant | `sentinel2_rgb` |
-| Global WUI  (Schug et al. 2023) | Wildland-Urban Interface classification | 10m, constant | `wui` |
+| Dataset | Description | Spatial Resolution | Temporal Resolution | Feature Name(s) |
+|---------|-------------|--------------------|---------------------|-----------------|
+| FEDS | Fire perimeter polygons and active firelines tracked from clusters of satellite active-fire detections | 375 m | 12-hourly | `burn_perimeter`, `fireline` |
+| VIIRS Active Fire | Fire Radiative Power (MW) reported at detected hotspot pixels, split by day vs. night overpass | 375 m | ~2 overpasses/day | `frp_daytime`, `frp_nighttime` |
+| FEDS × VIIRS Active Fire *(derived)* | Maximum FRP from nearby hotspots painted onto each FEDS fireline segment | 375 m | 12-hourly | `fireline_max_frp` |
+| 3DEP | Bare-earth elevation, plus a colored hill-shade RGB visualization derived from it | 1 m | Static | `elevation`, `terrain_rgb` |
+| LANDFIRE | Canopy fuel layers: canopy bulk density and percent canopy cover | 30 m | Static | `canopy_bulk_density`, `canopy_cover` |
+| HRRR | Near-surface weather forecast fields: 2 m relative humidity and 10 m wind components | 3 km | Hourly | `r2`, `u10`, `v10` |
+| Global Building Atlas | Per-building height estimates rasterized to a regular grid | 3 m | Static | `building_height` |
+| WorldCover | Global land cover classification (11 classes) | 10 m | Static | `landcover` |
+| Global LAI | Leaf Area Index retrieved from Sentinel-2 surface reflectance | 10 m | Single global snapshot | `lai` |
+| Sentinel-2 Cloudless Mosaic | Cloud-free RGB composite built from Sentinel-2 surface-reflectance scenes | 10 m | Annual composite | `sentinel2_rgb` |
+| Global WUI | Wildland–Urban Interface classes from a buildings × wildland-vegetation overlay | 10 m | Static | `wui` |
 
 ## Installation
 
