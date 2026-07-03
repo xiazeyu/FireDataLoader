@@ -19,6 +19,66 @@ NIFC_IFPH_URL = (
     "InterAgencyFirePerimeterHistory_All_Years_View/FeatureServer/0/query"
 )
 
+# The All-Years view lags badly for the current decade: as of mid-2026 it holds
+# ~3,000 perimeters/yr through 2019 but only ~30-150/yr for 2020-2024, while the
+# per-decade read-only layer (same schema) carries the missing fires. Lookback
+# windows that touch the 2020s must therefore sweep this layer too.
+NIFC_IFPH_2020S_URL = (
+    "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/"
+    "InterAgencyFirePerimeterHistory_2020s_Read_Only/FeatureServer/0/query"
+)
+
+
+def _query_ifph(base_url: str, where: str, bbox_4326: str) -> list:
+    """Page through one IFPH FeatureServer query, returning all GeoJSON features.
+
+    The service caps each response at maxRecordCount (2000) and flags
+    truncation via properties.exceededTransferLimit in GeoJSON output, so page
+    through with resultOffset until a short/untruncated page comes back.
+    Without this, a heavily-burned AOI would silently lose every perimeter past
+    the cap (cf. the paged query in sources/mtbs.py).
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    page_size = 2000
+    feats: list = []
+    offset = 0
+    while True:
+        params = {
+            "where": where,
+            "geometry": bbox_4326,
+            "geometryType": "esriGeometryEnvelope",
+            "inSR": "4326",
+            "outSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "outFields": "FIRE_YEAR_INT,INCIDENT,GIS_ACRES,SOURCE,DATE_CUR",
+            "f": "geojson",
+            "resultOffset": offset,
+            "resultRecordCount": page_size,
+            "returnGeometry": "true",
+        }
+        url = f"{base_url}?{urllib.parse.urlencode(params)}"
+        log.debug(f"NIFC IFPH query URL (offset={offset}): {url}")
+
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError) as e:
+            raise RuntimeError(f"NIFC IFPH query failed: {e}") from e
+
+        page = payload.get("features", []) or []
+        feats.extend(page)
+        # GeoJSON nests the flag under "properties" (f=json puts it top-level).
+        truncated = bool((payload.get("properties") or {}).get("exceededTransferLimit"))
+        # Stop on an empty page (guards against an infinite loop) or a short page
+        # the service did not flag as truncated.
+        if not page or (len(page) < page_size and not truncated):
+            break
+        offset += len(page)
+    return feats
+
 
 def download_nifc_perimeters(
     task_info: ProcessingTask,
@@ -34,6 +94,14 @@ def download_nifc_perimeters(
     fire that ended before ``task_info.t_start`` is captured here even if
     LANDFIRE has not yet ingested it.
 
+    Queries the All-Years view and, when the lookback window touches the 2020s,
+    also the ``_2020s_Read_Only`` decade layer -- the All-Years view is nearly
+    empty for 2020+ (see :data:`NIFC_IFPH_2020S_URL`), so without the decade
+    sweep a post-2019 event would see no recent burns at all. Rows returned by
+    both services (or duplicated between agency and WFIGS copies) dedupe by
+    their attribute tuple; genuinely distinct copies of the same incident are
+    kept, which is harmless -- rasterization keeps one year per pixel.
+
     Args:
         task_info: Task configuration with bounds, CRS, and event time range.
         lookback_years: Number of years before ``task_info.year`` to include.
@@ -47,10 +115,6 @@ def download_nifc_perimeters(
         ``2024.0``) that the pixel was inside a fire perimeter; pixels never burned
         in the window are ``NaN``. The lookback length is recorded in ``note``.
     """
-    import urllib.error
-    import urllib.parse
-    import urllib.request
-
     from shapely.geometry import shape
 
     log.info(
@@ -81,50 +145,34 @@ def download_nifc_perimeters(
         f"(FIRE_YEAR_INT = {year} AND DATE_CUR IS NOT NULL "
         f"AND DATE_CUR < '{tstart_yyyymmdd}')"
     )
-    # The service caps each response at maxRecordCount (2000) and flags
-    # truncation via properties.exceededTransferLimit in GeoJSON output, so page
-    # through with resultOffset until a short/untruncated page comes back.
-    # Without this, a heavily-burned AOI would silently lose every perimeter past
-    # the cap (cf. the paged query in sources/mtbs.py).
-    page_size = 2000
+    urls = [NIFC_IFPH_URL]
+    if year >= 2020 and year_min <= 2029:
+        urls.append(NIFC_IFPH_2020S_URL)
+
+    # The same underlying record can come back from both services; dedupe on the
+    # requested attribute tuple so it is counted once. Distinct copies of one
+    # incident (e.g. a CALFIRE and a WFIGS perimeter with different DATE_CUR)
+    # are intentionally kept.
     feats: list = []
-    offset = 0
-    while True:
-        params = {
-            "where": where,
-            "geometry": bbox_4326,
-            "geometryType": "esriGeometryEnvelope",
-            "inSR": "4326",
-            "outSR": "4326",
-            "spatialRel": "esriSpatialRelIntersects",
-            "outFields": "FIRE_YEAR_INT,INCIDENT,GIS_ACRES,SOURCE,DATE_CUR",
-            "f": "geojson",
-            "resultOffset": offset,
-            "resultRecordCount": page_size,
-            "returnGeometry": "true",
-        }
-        url = f"{NIFC_IFPH_URL}?{urllib.parse.urlencode(params)}"
-        log.debug(f"NIFC IFPH query URL (offset={offset}): {url}")
-
-        try:
-            with urllib.request.urlopen(url, timeout=60) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError) as e:
-            raise RuntimeError(f"NIFC IFPH query failed: {e}") from e
-
-        page = payload.get("features", []) or []
-        feats.extend(page)
-        # GeoJSON nests the flag under "properties" (f=json puts it top-level).
-        truncated = bool((payload.get("properties") or {}).get("exceededTransferLimit"))
-        # Stop on an empty page (guards against an infinite loop) or a short page
-        # the service did not flag as truncated.
-        if not page or (len(page) < page_size and not truncated):
-            break
-        offset += len(page)
+    seen_rows: set = set()
+    for base_url in urls:
+        for feat in _query_ifph(base_url, where, bbox_4326):
+            props = feat.get("properties") or {}
+            key = (
+                props.get("FIRE_YEAR_INT"),
+                (props.get("INCIDENT") or "").strip().upper(),
+                props.get("SOURCE"),
+                props.get("DATE_CUR"),
+                props.get("GIS_ACRES"),
+            )
+            if key in seen_rows:
+                continue
+            seen_rows.add(key)
+            feats.append(feat)
 
     log.info(
-        f"NIFC IFPH returned {len(feats)} perimeter(s) intersecting AOI "
-        f"for years {year_min}–{year}"
+        f"NIFC IFPH returned {len(feats)} unique perimeter(s) intersecting AOI "
+        f"for years {year_min}–{year} across {len(urls)} service(s)"
     )
 
     # Output grid (matches process_feds25mtbs convention).
@@ -189,8 +237,9 @@ def download_nifc_perimeters(
         data=[out_arr],
         timestamps=[task_info.t_start],
         source=(
-            "NIFC InteragencyFirePerimeterHistory_All_Years_View "
-            "(services3.arcgis.com/T4QMspbfLg3qTGWY)"
+            "NIFC "
+            + " + ".join(u.split("/services/")[1].split("/")[0] for u in urls)
+            + " (services3.arcgis.com/T4QMspbfLg3qTGWY)"
         ),
         native_resolution=task_info.resolution,
         unit="calendar year (NaN = unburned)",
@@ -199,6 +248,7 @@ def download_nifc_perimeters(
             "year_window": [year_min, year],
             "t_start": task_info.t_start.isoformat(),
             "n_features": len(feats),
+            "services": [u.split("/services/")[1].split("/")[0] for u in urls],
             "incidents_by_year": {
                 str(y): sorted(set(n)) for y, n in incidents_summary.items()
             },
