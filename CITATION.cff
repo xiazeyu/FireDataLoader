@@ -3,8 +3,8 @@ message: "If you use FireDataForge, please cite the article in 'preferred-citati
 title: FireDataForge
 type: software
 version: 0.1.0
-doi: 10.5281/zenodo.20743742
-url: https://doi.org/10.5281/zenodo.20743742
+doi: 10.5281/zenodo.20744739
+url: https://doi.org/10.5281/zenodo.20744739
 license: MIT
 repository-code: https://github.com/xiazeyu/FireDataForge
 authors:
