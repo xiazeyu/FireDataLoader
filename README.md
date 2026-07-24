@@ -2,7 +2,7 @@
 
 A tool for downloading and processing wildfire-related geospatial data from multiple sources for machine learning and analysis.
 
-Software DOI: [10.5281/zenodo.20743742](https://doi.org/10.5281/zenodo.20743742).
+Software DOI: [10.5281/zenodo.20744740](https://doi.org/10.5281/zenodo.20744740).
 
 Preprint: Xia, Z., Chen, L., Liu, Y., & Huang, H. (2026). *FireDataForge: A
 Unified Framework for Multi-Source Wildfire Data Retrieval and Integration*.
@@ -1003,7 +1003,7 @@ If you use FireDataForge in your research, please cite the preprint:
 }
 ```
 
-The software itself ([doi:10.5281/zenodo.20743742](https://doi.org/10.5281/zenodo.20743742))
+The software itself ([doi:10.5281/zenodo.20744740](https://doi.org/10.5281/zenodo.20744740))
 and the reproducibility bundle ([doi:10.5281/zenodo.20743743](https://doi.org/10.5281/zenodo.20743743))
 have their own archival DOIs (see [`CITATION.cff`](CITATION.cff)).
 
