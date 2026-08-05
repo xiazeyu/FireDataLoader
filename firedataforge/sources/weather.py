@@ -21,11 +21,13 @@ from schemas import DataLayer, ProcessingTask
 xr.set_options(use_new_combine_kwarg_defaults=True)
 log = logging.getLogger(__name__)
 
-# HRRR is clipped/reprojected to this resolution (m) rather than the 30 m task
-# grid. HRRR's native grid is ~3 km, so resampling an hourly time series to 30 m
-# would inflate file size ~250x without adding spatial information. The weather
-# layers therefore sit on their own coarser grid (same bounds as the task grid);
-# each weather layer records this in its ``current_resolution``.
+# HRRR is clipped/reprojected to approximately this resolution (m) rather than the
+# 30 m task grid. HRRR's native grid is ~3 km, so resampling an hourly time series
+# to 30 m would inflate file size ~250x without adding spatial information. The
+# weather layers therefore sit on their own coarser grid, spanning exactly the same
+# bounds as the task grid; Each weather layer
+# records the nominal value in ``current_resolution`` and the exact per-axis cell
+# size in ``note['grid']``.
 HRRR_OUTPUT_RESOLUTION = 500
 
 
@@ -39,10 +41,15 @@ def clip_hrrr_to_task(
     Transforms HRRR data from its native Lambert Conformal Conic projection
     to the task CRS and clips to the task bounds.
 
+    The output grid spans exactly ``task_info.bounds``: the cell count is
+    ``target_resolution`` rounded to whole cells and the cell size is then the
+    extent divided by that count, so ``target_resolution`` is nominal (typically
+    within a few percent) and the grid tiles the bounds without remainder.
+
     Args:
         hrrr_data: HRRR xarray Dataset from Herbie.
         task_info: Task configuration with bounds and CRS.
-        target_resolution: Output resolution in meters.
+        target_resolution: Nominal output resolution in meters.
 
     Returns:
         Reprojected and clipped xarray Dataset.
@@ -72,15 +79,17 @@ def clip_hrrr_to_task(
     hrrr_data = hrrr_data.assign_coords(x=x_coords, y=y_coords)
     hrrr_data = hrrr_data.rio.write_crs(crs)
 
-    # Define output grid
+    # Define output grid.
     minx, miny, maxx, maxy = task_info.bounds
-    width = int((maxx - minx) / target_resolution)
-    height = int((maxy - miny) / target_resolution)
+    width = max(1, round((maxx - minx) / target_resolution))
+    height = max(1, round((maxy - miny) / target_resolution))
+    pixel_x = (maxx - minx) / width
+    pixel_y = (maxy - miny) / height
 
     # Create affine transform for target grid
     target_transform = Affine.translation(
         minx, maxy
-    ) * Affine.scale(target_resolution, -target_resolution)
+    ) * Affine.scale(pixel_x, -pixel_y)
 
     # Reproject and clip
     hrrr_data = hrrr_data.rio.reproject(
@@ -91,6 +100,23 @@ def clip_hrrr_to_task(
     )
 
     return hrrr_data
+
+
+def _weather_grid_note(task_info: ProcessingTask, shape: tuple[int, int]) -> dict:
+    """Exact cell size of the weather grid, recorded alongside the nominal one.
+
+    Derived the same way a consumer must -- from the shared task bounds and the
+    array's own shape (see :class:`schemas.GeoReference`) -- so writing it out
+    doubles as an in-code statement of that contract.
+    """
+    minx, miny, maxx, maxy = task_info.bounds
+    height, width = shape
+    return {
+        'nominal_resolution_m': HRRR_OUTPUT_RESOLUTION,
+        'pixel_size_x_m': (maxx - minx) / width,
+        'pixel_size_y_m': (maxy - miny) / height,
+        'shape': [int(height), int(width)],
+    }
 
 
 def _calculate_rh_from_t_td(t_celsius: np.ndarray, td_celsius: np.ndarray) -> np.ndarray:
@@ -343,6 +369,8 @@ def download_hrrr(
     payload = []
     for var_name, var_info in data_buffer.items():
         if var_info['data']:  # Only add if there's data
+            note = {'data_gaps': data_gaps} if data_gaps else {}
+            note['grid'] = _weather_grid_note(task_info, var_info['data'][0].shape)
             payload.append(DataLayer(
                 name=var_name,
                 data=var_info['data'],
@@ -352,7 +380,7 @@ def download_hrrr(
                 # Weather sits on its own coarser grid, not the 30 m task grid.
                 current_resolution=HRRR_OUTPUT_RESOLUTION,
                 unit="%" if var_name == 'r2' else "m/s",
-                note={'data_gaps': data_gaps} if data_gaps else {},
+                note=note,
             ))
         else:
             log.warning(f"No data collected for {var_name}")

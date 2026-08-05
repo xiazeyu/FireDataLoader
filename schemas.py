@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 @dataclass
@@ -30,6 +30,8 @@ class FireEvent:
         t_end: End datetime of the fire.
         bounds: Bounding box as (minx, miny, maxx, maxy) in the specified CRS.
         crs: Coordinate reference system for the bounds (default: EPSG:4326).
+        aoi_wkt: Convex hull of the fire's true perimeter as a WKT string in
+            ``crs``, when a FEDS GeoPackage supplied one.
     """
     event_id: str
     name: str
@@ -39,6 +41,7 @@ class FireEvent:
     t_end: datetime
     bounds: tuple[float, float, float, float]
     crs: str = "EPSG:4326"
+    aoi_wkt: Optional[str] = None
 
 
 @dataclass
@@ -60,6 +63,8 @@ class ProcessingTask:
         t_end_estimated: ``True`` when ``t_end`` is a fallback estimate
             (``t_start`` + a fixed window) because neither a FEDS perimeter nor an
             explicit end date was available; ``False`` when it is observation-derived.
+        buffer: Margin in meters added around the fire's extent.
+        aoi_mode: How the extent was derived.
     """
     event_id: str
     name: str
@@ -71,6 +76,8 @@ class ProcessingTask:
     shape: tuple[int, int]
     crs: str
     t_end_estimated: bool = False
+    buffer: int = 100
+    aoi_mode: str = "bbox"
 
 
 @dataclass
@@ -186,7 +193,11 @@ class ProcessingArgs:
 
     Attributes:
         resolution: Spatial resolution in meters.
-        buffer: Buffer distance around fire bounds in meters.
+        buffer: Margin in meters added around the fire's extent.
+        aoi_mode: ``"tight"`` builds the grid from the fire's true projected
+            perimeter; ``"bbox"`` uses the legacy lon/lat envelope, whose
+            axis-aligned extent in the target CRS is inflated by the grid
+            convergence. Events without perimeter geometry always use ``"bbox"``.
         crs: Target coordinate reference system.
         output_dir: Output directory for saved data.
         interpolation: Number of intermediate frames to interpolate.
@@ -200,7 +211,8 @@ class ProcessingArgs:
         layer_workers: Max concurrent layer downloads within a single event.
     """
     resolution: int = 30
-    buffer: int = 100
+    buffer: int = 600
+    aoi_mode: str = "tight"
     crs: str = "EPSG:5070"
     output_dir: str = "output"
     interpolation: int = 0

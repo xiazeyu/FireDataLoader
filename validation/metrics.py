@@ -220,18 +220,66 @@ def reprojection_roundtrip_error(event_dir: str) -> dict:
     }
 
 
+def _expected_ingrid_splat(x: np.ndarray, y: np.ndarray, values: np.ndarray,
+                           bounds: tuple[float, float, float, float],
+                           shape: tuple[int, int], resolution: int,
+                           source_resolution: float = 375.0) -> np.ndarray:
+    """Oracle for the Gaussian splat, independent of ``sources/frp.py``.
+
+    Normalizes each detection over the **whole** kernel window, so a detection
+    inside the grid contributes exactly its value and a clipped one contributes
+    exactly the in-grid fraction of its Gaussian mass. Reimplemented here rather
+    than imported so :func:`frp_conservation` cannot be graded by the code it is
+    checking.
+    """
+    minx, miny, maxx, maxy = bounds
+    height, width = shape
+    raster = np.zeros(shape, dtype=np.float64)
+
+    sigma_pixels = (source_resolution / resolution) / 2.0
+    kernel_radius = int(np.ceil(3 * sigma_pixels))
+    px = (x - minx) / resolution
+    py = (maxy - y) / resolution
+
+    for i in range(len(values)):
+        px_center, py_center = int(np.round(px[i])), int(np.round(py[i]))
+        cells, wsum = [], 0.0
+        for dy in range(-kernel_radius, kernel_radius + 1):
+            for dx in range(-kernel_radius, kernel_radius + 1):
+                row, col = py_center + dy, px_center + dx
+                dist_sq = ((col + 0.5) - px[i]) ** 2 + ((row + 0.5) - py[i]) ** 2
+                w = np.exp(-dist_sq / (2 * sigma_pixels ** 2))
+                wsum += w
+                if 0 <= row < height and 0 <= col < width:
+                    cells.append((row, col, w))
+        if wsum > 0:
+            for row, col, w in cells:
+                raster[row, col] += values[i] * w / wsum
+    return raster
+
+
 def frp_conservation(event_dir: str) -> dict:
     """Radiative-power conservation of the mass-preserving Gaussian splat.
 
     Reloads the event's VIIRS active-fire points (the same source the pipeline used),
     re-splats them onto the grid *without* perimeter masking to isolate the splat
-    operator, and compares the rasterized total against the summed point FRP. The
-    splat normalizes each footprint's weights to sum to one, so a correct
-    implementation conserves the radiative integral; ``rel_error`` is the fraction
-    lost, attributable only to points whose footprint falls off the grid edge.
+    operator, and compares the rasterized total against two references.
 
-    Returns ``{"point_sum_mw", "raster_integral_mw", "rel_error"}`` or ``{}`` when the
-    task metadata or fire points are unavailable.
+    ``rel_error`` is measured against the summed point FRP, so it is the fraction
+    lost at the grid edge -- non-zero whenever a footprint is clipped, which is the
+    common case (the AOI margin is routinely smaller than the 570 m kernel radius).
+    On its own it cannot distinguish a correct edge loss from a broken operator: an
+    implementation that renormalizes by the in-bounds weights alone drives it to
+    ~0 by piling the off-grid mass back onto the boundary cells.
+
+    ``rel_error_vs_expected`` is therefore the real assertion. It compares the
+    raster against ``expected_ingrid_mw`` -- each detection's FRP times the in-grid
+    fraction of its Gaussian mass, computed independently in
+    :func:`_expected_ingrid_splat` -- and must be ~0.
+
+    Returns ``{"point_sum_mw", "raster_integral_mw", "rel_error",
+    "expected_ingrid_mw", "rel_error_vs_expected"}`` or ``{}`` when the task
+    metadata or fire points are unavailable.
     """
     task = _task_from_event(event_dir)
     if task is None:
@@ -259,10 +307,24 @@ def frp_conservation(event_dir: str) -> dict:
     # Empty mask lists -> unmasked, isolating the splat from perimeter masking.
     rasters, _ = _rasterize_fire_points(df, task, [], [])
     raster_sum = float(sum(np.nansum(r) for r in rasters))
+
+    # Independent oracle: the in-grid share of each detection's Gaussian mass.
+    try:
+        transformer = Transformer.from_crs("EPSG:4326", task.crs, always_xy=True)
+        x, y = transformer.transform(df["Lon"].values, df["Lat"].values)
+        expected = float(np.nansum(_expected_ingrid_splat(
+            np.asarray(x), np.asarray(y), df["FRP"].to_numpy(dtype=float),
+            task.bounds, task.shape, task.resolution)))
+    except Exception:
+        expected = None
+
     return {
         "point_sum_mw": point_sum,
         "raster_integral_mw": raster_sum,
         "rel_error": abs(raster_sum - point_sum) / point_sum if point_sum else None,
+        "expected_ingrid_mw": expected,
+        "rel_error_vs_expected": (
+            abs(raster_sum - expected) / expected if expected else None),
     }
 
 

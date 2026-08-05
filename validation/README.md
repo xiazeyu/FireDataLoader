@@ -20,7 +20,7 @@ Each event contributes one CSV row; the column names below are `<metric>.<field>
 | Metric (CSV key) | What it checks |
 |------------------|----------------|
 | `reprojection` | Pixel-center displacement after target-CRS → EPSG:4326 → target-CRS round trip (meters). Catches CRS / axis-order regressions. |
-| `frp_conservation` | Reloads the event's VIIRS fire points, re-splats them unmasked, and compares the rasterized total against the summed point FRP, verifying the Gaussian splat conserves total radiative power. |
+| `frp_conservation` | Reloads the event's VIIRS fire points, re-splats them unmasked, and compares the rasterized total against two references: the summed point FRP (`rel_error`, i.e. the loss at the grid edge) and the expected in-grid Gaussian mass (`rel_error_vs_expected`, which must be ~0). The second is the real assertion — see the note below. |
 | `categorical_landcover` | Overall accuracy between the pipeline `landcover` and a majority-aggregated native ESA WorldCover (10 m) reference on the same grid — the fraction of pixels where nearest-neighbour resampling agrees with the dominant native class (its complement is the disagreement rate). |
 | `categorical_wui` | Overall accuracy between the pipeline `wui` and a majority-aggregated native GlobalWUI (10 m) reference. |
 | `continuous_elevation` | RMSE / MAE of `elevation` vs. the native 3DEP DEM mean-aggregated to the target grid — the residual is sub-pixel terrain variance discarded by bilinear resampling. |
@@ -66,8 +66,14 @@ The per-event results:
 Round-trip reprojection RMSE is ≈3×10⁻⁹ m (sub-nanometer) for every event — far below
 any physically meaningful displacement, confirming the CRS/axis-order handling is exact
 (the per-pixel maximum displacement stays ≤1.2×10⁻⁸ m across all events).
-FRP conservation holds to ≤0.03% (exact to rounding for the pre-2025 firepix events,
-whose detections lie well inside the grid); land-cover overall accuracy averages 0.944 and
+FRP conservation holds to ≤0.03% against the expected in-grid mass. Note that
+`rel_error` (measured against the summed point FRP) is *expected* to be non-zero
+whenever a footprint is clipped by the grid edge, which is common: the AOI margin is
+routinely smaller than the 570 m splat kernel radius. `rel_error` alone therefore
+cannot distinguish a correct edge loss from a broken operator — an implementation
+that renormalized by the in-grid weights would drive it to ~0 by piling the off-grid
+mass back onto the boundary pixels. `rel_error_vs_expected` is the assertion that
+actually constrains the splat. Land-cover overall accuracy averages 0.944 and
 WUI overall accuracy 0.998 against the independently majority-aggregated native references
 (a 5.6% and 0.2% mean per-pixel disagreement rate, respectively); elevation RMSE averages
 4.27 m (well under the 30 m grid spacing); and registration stays sub-pixel (≤0.67 px,

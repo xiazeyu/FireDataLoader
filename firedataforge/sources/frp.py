@@ -466,6 +466,13 @@ def _gaussian_splat_rasterize(
     shares of the detection's FRP (much smaller than the observed value), not the
     observed value itself.
 
+    Normalization is over the whole kernel window rather than only its in-bounds
+    part, so the grid edge is lossy rather than accumulative: a detection near the
+    boundary contributes exactly the in-grid fraction of its Gaussian mass, and one
+    whose window falls entirely off the grid contributes nothing. Rescaling by the
+    in-bounds weights instead would deposit a clipped detection's *full* FRP onto
+    the boundary cells.
+
     Args:
         x: X coordinates in target CRS.
         y: Y coordinates in target CRS.
@@ -502,7 +509,13 @@ def _gaussian_splat_rasterize(
 
         val = values[i]
 
-        # Pass 1: gather the in-bounds Gaussian weights for this point's footprint.
+        # Pass 1: accumulate the Gaussian weights over the WHOLE kernel window,
+        # in bounds or not, while collecting only the cells that land on the grid.
+        # Normalizing by the in-bounds sum alone would rescale a clipped footprint
+        # back up to the detection's full FRP -- piling the off-grid mass onto the
+        # boundary cells, and inflating every in-bounds cell of that footprint by
+        # the same factor. Interior detections are unaffected: their window lies
+        # entirely in bounds, so this sum is identical to the in-bounds one.
         cells = []
         wsum = 0.0
         for dy in range(-kernel_radius, kernel_radius + 1):
@@ -510,19 +523,22 @@ def _gaussian_splat_rasterize(
                 row = py_center + dy
                 col = px_center + dx
 
+                # Distance from point center to pixel center
+                dist_x = (col + 0.5) - px[i]
+                dist_y = (row + 0.5) - py[i]
+                dist_sq = dist_x**2 + dist_y**2
+                w = np.exp(-dist_sq / (2 * sigma_pixels**2))
+                wsum += w
+
                 if 0 <= row < height and 0 <= col < width:
-                    # Distance from point center to pixel center
-                    dist_x = (col + 0.5) - px[i]
-                    dist_y = (row + 0.5) - py[i]
-                    dist_sq = dist_x**2 + dist_y**2
-                    w = np.exp(-dist_sq / (2 * sigma_pixels**2))
                     cells.append((row, col, w))
-                    wsum += w
 
         # Pass 2: deposit val * w / sum(w) so the footprint weights sum to one and
-        # the point's full FRP is conserved (mass-preserving): summing the rasterized
-        # footprint recovers the observed value. Points whose footprint lies entirely
-        # within the grid contribute exactly ``val`` to the raster total.
+        # the point's full FRP is conserved (mass-preserving): a detection whose
+        # footprint lies entirely within the grid contributes exactly ``val`` to the
+        # raster total, a clipped footprint contributes exactly the in-grid fraction
+        # of its Gaussian mass, and a detection whose window is wholly off the grid
+        # contributes nothing.
         if wsum > 0:
             for row, col, w in cells:
                 raster[row, col] += val * w / wsum

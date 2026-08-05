@@ -14,7 +14,7 @@ import pandas as pd
 from rasterio import features
 from rasterio.transform import from_origin
 from scipy.ndimage import distance_transform_edt
-from shapely.geometry import MultiPolygon
+from shapely.geometry import GeometryCollection, MultiPolygon
 
 from firedataforge.constants import (
     CACHE_DIR, FEDS_CACHE_DIR, FEDS_CACHE_NAME, FEDS_DIR,
@@ -261,6 +261,54 @@ def get_perimeter_bounds(
     if any(pd.isna(v) for v in (minx, miny, maxx, maxy)):
         return None
     return (float(minx), float(miny), float(maxx), float(maxy))
+
+
+def get_perimeter_hull_wkt(
+    event_id: str,
+    year: Optional[int] = None,
+    cache_dir: str = CACHE_DIR,
+    gpkg_path: Optional[str] = None,
+    perimeter_gdf: Optional[gpd.GeoDataFrame] = None,
+) -> Optional[str]:
+    """Return the perimeter's convex hull as WKT in EPSG:4326, or ``None``.
+
+    :func:`get_perimeter_bounds` reduces the perimeter to a lon/lat *envelope*,
+    which discards the fire's shape. That matters because a lon/lat-aligned box is
+    a rotated quadrilateral in a projected CRS -- the grid convergence reaches
+    ~13.6 degrees at the western edge of EPSG:5070 -- so its axis-aligned extent in
+    the target CRS is much larger than the fire and sits off-centre within it.
+    Keeping the geometry lets :func:`~firedataforge.events.get_task_info` take the
+    extent *after* projecting, which is both tight and centred.
+
+    The convex hull is sufficient and far cheaper than the full geometry: the
+    bounding box of a projected geometry equals that of its projected hull, and
+    building it from a ``GeometryCollection`` avoids a boolean union over every
+    perimeter frame.
+
+    Pass ``gpkg_path`` and/or ``perimeter_gdf`` to reuse an already-resolved path
+    or already-read layer, exactly as :func:`get_perimeter_bounds` does.
+    """
+    if perimeter_gdf is None:
+        if gpkg_path is None:
+            gpkg_path = find_event_gpkg(event_id, year, cache_dir=cache_dir)
+        if gpkg_path is None:
+            return None
+        try:
+            perimeter_gdf = read_perimeter_gdf(gpkg_path)
+        except Exception:
+            return None
+    gdf = perimeter_gdf[perimeter_gdf.geometry.notna()]
+    if gdf.empty:
+        return None
+    if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs("EPSG:4326")
+    try:
+        hull = GeometryCollection(list(gdf.geometry)).convex_hull
+    except Exception:
+        return None
+    if hull.is_empty or hull.geom_type not in ("Polygon", "LineString", "Point"):
+        return None
+    return hull.wkt
 
 
 def process_feds25mtbs(

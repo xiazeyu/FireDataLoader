@@ -48,8 +48,12 @@ def main() -> None:
                         help="Concurrent layer downloads within a single event")
     parser.add_argument("--resolution", "-r", type=int, default=30,
                         help="Target spatial resolution in meters")
-    parser.add_argument("--buffer", "-b", type=int, default=100,
-                        help="Buffer around the fire bounds in meters")
+    parser.add_argument("--buffer", "-b", type=int, default=600,
+                        help="Margin around the fire's extent in meters")
+    parser.add_argument("--aoi-mode", dest="aoi_mode", type=str, default="tight",
+                        choices=["tight", "bbox"],
+                        help="AOI extent: 'tight' uses the fire's true projected "
+                             "perimeter; 'bbox' uses the legacy lon/lat envelope")
     parser.add_argument("--crs", "-c", type=str, default="EPSG:5070",
                         help="Target coordinate reference system")
     parser.add_argument("--output_dir", "-o", type=str, default="output",
@@ -130,6 +134,7 @@ def main() -> None:
     processing_args = ProcessingArgs(
         resolution=args.resolution,
         buffer=args.buffer,
+        aoi_mode=args.aoi_mode,
         crs=args.crs,
         output_dir=args.output_dir,
         interpolation=args.interpolation,

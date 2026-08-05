@@ -88,3 +88,9 @@ summary has been recorded.
 
 `results.jsonl`, `logs/`, and `out/` are generated artifacts and are
 git-ignored — only this README and the script are committed.
+
+> **Timings published before the tight-AOI default are not comparable.** The
+> reference results (and the Zenodo reproducibility artifact) were produced with
+> the legacy AOI and a 100 m buffer. Grid sizes, and therefore wall-clock, now
+> differ: large fires shrink, small fires grow with the wider default buffer. Add
+> `--aoi-mode bbox --buffer 100` to reproduce the published grids and timings.

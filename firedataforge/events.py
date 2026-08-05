@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import geopandas as gpd
 import pandas as pd
+from shapely import wkt as shapely_wkt
 from shapely.geometry import box
 from tqdm import tqdm
 
@@ -20,6 +21,7 @@ from firedataforge.constants import (
 )
 from firedataforge.sources.feds import (
     find_event_gpkg, get_fire_progression_dates, get_perimeter_bounds,
+    get_perimeter_hull_wkt,
     index_event_gpkgs, read_perimeter_gdf,
 )
 from firedataforge.sources.mtbs import PROVISIONAL_IA, iter_all_events, query_mtbs
@@ -218,6 +220,7 @@ def _resolve_fire_event(
     t_start = record.get("t_start") or datetime(year, 1, 1)
     t_end = record.get("t_end")
     bounds = record["bounds"]
+    aoi_wkt = None
 
     gpkg_path = find_event_gpkg(event_id, year, cache_dir=cache_dir)
     if gpkg_path is not None:
@@ -233,6 +236,8 @@ def _resolve_fire_event(
             event_id, year, gpkg_path=gpkg_path, perimeter_gdf=perimeter_gdf)
         bounds = get_perimeter_bounds(
             event_id, year, gpkg_path=gpkg_path, perimeter_gdf=perimeter_gdf) or bounds
+        aoi_wkt = get_perimeter_hull_wkt(
+            event_id, year, gpkg_path=gpkg_path, perimeter_gdf=perimeter_gdf)
     elif t_end is None:
         # No local GeoPackage and no explicit end date -> blind fallback window.
         t_end = t_start + timedelta(days=DEFAULT_FIRE_WINDOW_DAYS)
@@ -251,6 +256,7 @@ def _resolve_fire_event(
         t_start=t_start,
         t_end=t_end,
         bounds=bounds,
+        aoi_wkt=aoi_wkt,
     )
 
 
@@ -538,36 +544,42 @@ def validate_projected_crs(crs: str) -> None:
 def get_task_info(
     fire_info: FireEvent,
     resolution: int = 30,
-    buffer: int = 100,
+    buffer: int = 600,
     crs: str = "EPSG:5070",
     cache_dir: str = CACHE_DIR,
+    aoi_mode: str = "tight",
 ) -> ProcessingTask:
     """Create a processing task configuration from fire event information.
 
-    Transforms the fire bounds to the target CRS, applies a buffer, and
-    calculates the output grid dimensions. The active-burning window (``t_start``,
-    ``t_end``) and the bounds are resolved upstream in :func:`get_fire_info`
-    (which applies the GeoPackage > FEDS-MTBS fire list > MTBS fire list > MTBS
-    online priority), so this function consumes them as-is and only re-derives
-    whether ``t_end`` is an estimate.
+    Projects the fire's extent into the target CRS, adds a buffer, and calculates
+    the output grid dimensions. The active-burning window (``t_start``, ``t_end``)
+    and the extent are resolved upstream in :func:`get_fire_info` (which applies
+    the GeoPackage > FEDS-MTBS fire list > MTBS fire list > MTBS online priority),
+    so this function consumes them as-is and only re-derives whether ``t_end`` is
+    an estimate.
 
     Args:
         fire_info: Fire event information.
         resolution: Target spatial resolution in meters.
-        buffer: Buffer distance to add around the fire bounds in meters.
+        buffer: Margin in meters to clear around the fire's extent.
         crs: Target coordinate reference system.
         cache_dir: Cache root for an on-demand FEDS GeoPackage fetch (under its
             fixed ``FEDS25MTBS`` subfolder) used to flag whether ``t_end`` is an
             estimate.
+        aoi_mode: ``"tight"`` or ``"bbox"``.
 
     Returns:
         ProcessingTask object defining the processing parameters.
 
     Raises:
         ValueError: If ``crs`` is not a projected, metre-based CRS (see
-            :func:`validate_projected_crs`).
+            :func:`validate_projected_crs`), or ``aoi_mode`` is not a known mode.
     """
     validate_projected_crs(crs)
+    if aoi_mode not in ("tight", "bbox"):
+        raise ValueError(
+            f"Unknown aoi_mode {aoi_mode!r}; expected 'tight' (grid built from the "
+            f"fire's true projected perimeter) or 'bbox' (legacy lon/lat envelope).")
 
     t_start, t_end = fire_info.t_start, fire_info.t_end
 
@@ -581,14 +593,31 @@ def get_task_info(
         and t_end == t_start + timedelta(days=DEFAULT_FIRE_WINDOW_DAYS)
     )
 
-    minx, miny, maxx, maxy = fire_info.bounds
-    bbox_poly = box(minx, miny, maxx, maxy)
-    bounds_gs = gpd.GeoSeries([bbox_poly], crs="EPSG:4326")
-    bounds_proj = bounds_gs.to_crs(crs)
+    use_tight = aoi_mode == "tight" and fire_info.aoi_wkt is not None
+    if use_tight:
+        # Project the perimeter's own geometry, then take its extent. Expanding by
+        # ``buffer`` arithmetically (rather than via a geometric buffer) is exact,
+        # so every side clears the fire by exactly that margin before snapping.
+        aoi = gpd.GeoSeries([shapely_wkt.loads(fire_info.aoi_wkt)],
+                            crs=fire_info.crs).to_crs(crs)
+        p_minx, p_miny, p_maxx, p_maxy = aoi.total_bounds
+        t_minx, t_miny = p_minx - buffer, p_miny - buffer
+        t_maxx, t_maxy = p_maxx + buffer, p_maxy + buffer
+    else:
+        if aoi_mode == "tight":
+            log.info(
+                f"No perimeter geometry for {fire_info.event_id}; building the grid "
+                f"from its lon/lat bounding box instead (aoi_mode=bbox). The box is "
+                f"all that is known about this fire's extent.")
+        # LEGACY PATH
+        minx, miny, maxx, maxy = fire_info.bounds
+        bbox_poly = box(minx, miny, maxx, maxy)
+        bounds_gs = gpd.GeoSeries([bbox_poly], crs=fire_info.crs)
+        bounds_proj = bounds_gs.to_crs(crs)
 
-    bounds_proj = bounds_proj.buffer(buffer)
+        bounds_proj = bounds_proj.buffer(buffer)
 
-    t_minx, t_miny, t_maxx, t_maxy = bounds_proj.total_bounds
+        t_minx, t_miny, t_maxx, t_maxy = bounds_proj.total_bounds
 
     target_bounds = (
         math.floor(t_minx / resolution) * resolution,
@@ -597,8 +626,8 @@ def get_task_info(
         math.ceil(t_maxy / resolution) * resolution
     )
 
-    width = int((target_bounds[2] - target_bounds[0]) / resolution)
-    height = int((target_bounds[3] - target_bounds[1]) / resolution)
+    width = max(1, int((target_bounds[2] - target_bounds[0]) / resolution))
+    height = max(1, int((target_bounds[3] - target_bounds[1]) / resolution))
 
     return ProcessingTask(
         event_id=fire_info.event_id,
@@ -611,4 +640,6 @@ def get_task_info(
         shape=(height, width),
         crs=crs,
         t_end_estimated=t_end_estimated,
+        buffer=buffer,
+        aoi_mode="tight" if use_tight else "bbox",
     )

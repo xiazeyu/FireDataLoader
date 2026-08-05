@@ -122,7 +122,8 @@ def process_single_fire(
             cache_dir=args.cache_dir)
         task_info = get_task_info(fire_info, resolution=args.resolution,
                                   buffer=args.buffer, crs=args.crs,
-                                  cache_dir=args.cache_dir)
+                                  cache_dir=args.cache_dir,
+                                  aoi_mode=args.aoi_mode)
     except Exception as exc:
         log.error(f"[{event_id}] cannot resolve event: {exc}")
         summary["status"] = "error"
@@ -135,6 +136,9 @@ def process_single_fire(
         "year": task_info.year,
         "crs": task_info.crs,
         "resolution_m": task_info.resolution,
+        "buffer_m": task_info.buffer,
+        "aoi_mode_requested": args.aoi_mode,
+        "aoi_mode_effective": task_info.aoi_mode,
         "shape": list(task_info.shape),
         "bounds": list(task_info.bounds),
         "t_start": task_info.t_start.isoformat(),
@@ -145,6 +149,11 @@ def process_single_fire(
         summary["notes"].append(
             f"t_end is an estimate (t_start + {DEFAULT_FIRE_WINDOW_DAYS} days): no "
             "FEDS perimeter and no fire-list end date were available.")
+    if task_info.aoi_mode != args.aoi_mode:
+        summary["notes"].append(
+            f"aoi_mode fell back to '{task_info.aoi_mode}' from '{args.aoi_mode}': "
+            "this event has no FEDS perimeter geometry, so its lon/lat bounding box "
+            "is the only extent available.")
 
     # Persist the grid descriptors shared by every layer.
     save_numpy(task_info, DataLayer(name="task_info", data=[asdict(task_info)]),
@@ -152,7 +161,8 @@ def process_single_fire(
     save_coordinates(task_info, args.output_dir)
     log.info(f"[{event_id}] {task_info.name} ({task_info.year}) | "
              f"{task_info.t_start.date()} -> {task_info.t_end.date()} | "
-             f"{task_info.resolution} m | {task_info.shape} | {task_info.crs}")
+             f"{task_info.resolution} m | {task_info.shape} | {task_info.crs} | "
+             f"aoi={task_info.aoi_mode} +{task_info.buffer} m")
 
     # --- Probe optional dependencies once ---
     # gee_ready() is non-interactive: it initializes Earth Engine if credentials

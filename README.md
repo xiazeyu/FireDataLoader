@@ -206,7 +206,8 @@ python main.py --batch events.txt [options]
 | `-w, --workers` | Events processed in parallel in batch mode | 1 |
 | `--layer-workers` | Concurrent layer downloads within a single event | 5 |
 | `-r, --resolution` | Spatial resolution (meters) | 30 |
-| `-b, --buffer` | Buffer around fire bounds (meters) | 100 |
+| `-b, --buffer` | Margin around the fire's extent (meters) | 600 |
+| `--aoi-mode` | AOI extent: `tight` (the fire's true projected perimeter) or `bbox` (legacy lon/lat envelope) | tight |
 | `-c, --crs` | Target coordinate reference system (must be a projected/metric CRS — see note below) | EPSG:5070 |
 | `-o, --output_dir` | Output directory | output |
 | `-t, --interpolation` | Intermediate frames between timesteps | 0 |
@@ -245,6 +246,25 @@ Each name above is an output file stem. The convenience aliases `landfire` and
 > supported** and is **rejected up front** with a clear error, since meter-valued
 > settings applied in degrees would produce a nonsensical grid. Use a projected,
 > meter-based CRS: the default `EPSG:5070` (CONUS Albers), a UTM zone, or similar.
+
+> **Why `--aoi-mode tight` is the default.** A fire's lon/lat bounding box is a
+> *rotated quadrilateral* once projected, so taking its axis-aligned extent in the target CRS
+> inflates the grid and leaves the fire off-centre. `tight` projects the
+> perimeter geometry *first* and takes the extent afterwards, so every side clears
+> the fire by exactly `--buffer` (plus up to one pixel of grid snap).
+>
+> Events with no FEDS perimeter geometry (pre-2012 / post-2024, resolved from an
+> MTBS bounding box alone) fall back to `bbox` automatically. There, the box is
+> genuinely all that is known, and its axis-aligned extent is already the smallest
+> correct grid. Each run records both the requested and the effective mode in
+> `task_summary.json`.
+>
+> To reproduce grids published before this change — including the 572 × 716
+> Palisades grid in the IEEE IRI 2026 paper — pass both flags:
+>
+> ```bash
+> python main.py CA3406811855120250107 --aoi-mode bbox --buffer 100
+> ```
 
 <details>
 <summary><strong>Examples</strong></summary>
@@ -323,10 +343,12 @@ layer, so a partial run is self-documenting:
   "event_id": "CA3432611848120191010",
   "name": "SADDLERIDGE", "year": 2019, "status": "partial",
   "crs": "EPSG:5070", "resolution_m": 30, "shape": [275, 377],
+  "buffer_m": 600, "aoi_mode_requested": "tight", "aoi_mode_effective": "bbox",
   "t_start": "2019-10-01T12:00:00", "t_end": "2019-10-16T12:00:00",
   "t_end_estimated": true,
   "has_feds_archive": false, "earth_engine": true, "firms_key": true,
-  "notes": ["t_end is an estimate (t_start + 15 days): no FEDS perimeter ..."],
+  "notes": ["t_end is an estimate (t_start + 15 days): no FEDS perimeter ...",
+            "aoi_mode fell back to 'bbox' from 'tight': this event has no FEDS ..."],
   "layers": {
     "elevation":      {"status": "ok",      "files": ["elevation.npy"]},
     "frp_daytime":    {"status": "ok",      "files": ["frp_daytime.npy"], "n_frames": 7},
@@ -340,6 +362,13 @@ layer, so a partial run is self-documenting:
 `status` is `"ok"` when all layers succeed, `"partial"` when any failed, or
 `"error"` if the event itself could not be resolved. Batch runs additionally write
 an aggregated `output/batch_summary.json`.
+
+This example is a run without the FEDS archive, so it also shows the AOI fallback:
+`aoi_mode_requested` is `tight` but there is no perimeter geometry to build a tight
+extent from, so `aoi_mode_effective` records `bbox` and a note explains why. The
+`shape` shown is illustrative and does not correspond to any particular
+`buffer_m` — `buffer_m` and `aoi_mode_effective` are exactly what make a grid
+reproducible from its own metadata.
 
 </details>
 
@@ -591,16 +620,19 @@ For a detection with value `F` at grid position `(pₓ, p_y)` (pixel units):
   `⌈3σ⌉` pixels (covering ±3σ, ≈ 99.7 % of the Gaussian mass).
 - **Weights.** A pixel whose center is at distance `d` (pixels) from the
   detection gets `w = exp(−d² / (2σ²))`.
-- **Normalization (conservation).** The in-grid weights are normalized to sum to
-  one and the deposit is `F · w / Σw`. Summing the rasterized footprint therefore
-  recovers `F` exactly for any detection whose footprint lies inside the grid;
-  the only loss is the fraction of a footprint that falls off the grid edge. Each
-  pixel value is thus a *share* of the detection's FRP (≪ the observed MW), not
-  the observed value itself.
+- **Normalization (conservation).** The weights over the **whole** kernel window
+  are normalized to sum to one and the deposit is `F · w / Σw`. Summing the
+  rasterized footprint therefore recovers `F` exactly for any detection whose
+  footprint lies inside the grid; the only loss is the fraction of a footprint
+  that falls off the grid edge, and a detection whose window falls entirely off
+  the grid contributes nothing. Each pixel value is thus a *share* of the
+  detection's FRP (≪ the observed MW), not the observed value itself.
+  Normalizing over the in-grid weights alone would instead rescale a clipped
+  footprint back up to `F`, piling the off-grid mass onto the boundary pixels.
 
-The `validation/` suite re-splats each event's detections and reports the
-relative conservation error (typically far below 1 %); see
-[`validation/README.md`](validation/README.md).
+The `validation/` suite re-splats each event's detections and reports both the
+loss against the summed point FRP and the error against the expected in-grid mass;
+see [`validation/README.md`](validation/README.md).
 
 ## Nodata, missing data & temporal alignment
 
@@ -688,14 +720,14 @@ across diverse fuels, scales, and spread regimes.
 
 | Fire | Year | State | MTBS Event ID | Burned area (ac) | Active-fire window (UTC) | Grid (H×W) |
 |------|------|-------|---------------|------------------|--------------------------|------------|
-| Black Forest | 2013 | CO | `CO3901210474920130611` | 11,885 | 2013-06-11 → 06-13 | 369 × 462 |
-| Tubbs | 2017 | CA | `CA3859812261820171009` | 36,981 | 2017-10-09 → 10-15 | 848 × 681 |
-| Spring Creek | 2018 | CO | `CO3749610529120180627` | 107,108 | 2018-06-28 → 07-10 | 1194 × 944 |
-| Camp | 2018 | CA | `CA3982012144020181108` | 153,687 | 2018-11-08 → 11-20 | 1397 × 1448 |
-| Saddleridge | 2019 | CA | `CA3432611848120191010` | 9,654 | 2019-10-01 → 10-12 | 361 × 388 |
-| East Troublesome | 2020 | CO | `CO4020310623920201014` | 188,924 | 2020-10-14 → 10-24 | 1016 × 1602 |
-| Palisades | 2025 | CA | `CA3406811855120250107` | 23,448 † | 2025-01-07 → 01-11 | 572 × 716 |
-| Eaton | 2025 | CA | `CA3419211810520250108` | 14,021 † | 2025-01-08 → 01-10 | 396 × 519 |
+| Black Forest | 2013 | CO | `CO3901210474920130611` | 11,885 | 2013-06-11 → 06-13 | 355 × 455 |
+| Tubbs | 2017 | CA | `CA3859812261820171009` | 36,981 | 2017-10-09 → 10-15 | 673 × 669 |
+| Spring Creek | 2018 | CO | `CO3749610529120180627` | 107,108 | 2018-06-28 → 07-10 | 1171 × 921 |
+| Camp | 2018 | CA | `CA3982012144020181108` | 153,687 | 2018-11-08 → 11-20 | 1090 × 1308 |
+| Saddleridge | 2019 | CA | `CA3432611848120191010` | 9,654 | 2019-10-01 → 10-12 | 299 × 376 |
+| East Troublesome | 2020 | CO | `CO4020310623920201014` | 188,924 | 2020-10-14 → 10-24 | 907 × 1580 |
+| Palisades | 2025 | CA | `CA3406811855120250107` | 23,448 † | 2025-01-07 → 01-11 | 471 × 679 |
+| Eaton | 2025 | CA | `CA3419211810520250108` | 14,021 † | 2025-01-08 → 01-10 | 336 × 476 |
 
 Burned area is the MTBS `BurnBndAc`. The two 2025 fires (Palisades, Eaton) are not
 yet in the MTBS final record, so the value marked **†** is the MTBS *Provisional
@@ -708,7 +740,7 @@ The **active-fire window** is each event's perimeter-growth
 period taken from the FEDS progression (observation-derived, not the estimated
 fallback); the exact `t_start`/`t_end` (including the time of day) are in each
 event's `task_summary.json`. **Grid** is the output raster size on the default
-EPSG:5070 30 m grid (100 m buffer); it scales with `-r`/`-b`.
+EPSG:5070 30 m grid (`tight` AOI, 600 m buffer); it scales with `-r`/`-b`/`--aoi-mode`.
 
 ### Looking up an MTBS Event ID
 
