@@ -9,7 +9,7 @@ from pyproj import Transformer
 from rasterio import features
 from rasterio.transform import from_origin
 
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 log = logging.getLogger(__name__)
 

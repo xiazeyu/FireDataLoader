@@ -16,7 +16,7 @@ from rasterio.enums import Resampling
 from tqdm import tqdm
 
 from firedataforge.constants import CACHE_DIR, HERBIE_CACHE_NAME
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 xr.set_options(use_new_combine_kwarg_defaults=True)
 log = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def _weather_grid_note(task_info: ProcessingTask, shape: tuple[int, int]) -> dic
     """Exact cell size of the weather grid, recorded alongside the nominal one.
 
     Derived the same way a consumer must -- from the shared task bounds and the
-    array's own shape (see :class:`schemas.GeoReference`) -- so writing it out
+    array's own shape (see :class:`firedataforge.schemas.GeoReference`) -- so writing it out
     doubles as an in-code statement of that contract.
     """
     minx, miny, maxx, maxy = task_info.bounds

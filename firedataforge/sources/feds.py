@@ -20,7 +20,7 @@ from firedataforge.constants import (
     CACHE_DIR, FEDS_CACHE_DIR, FEDS_CACHE_NAME, FEDS_DIR,
     FEDS_MTBS_CHEN_DOI, FEDS_MTBS_ZENODO_DOI,
 )
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 log = logging.getLogger(__name__)
 

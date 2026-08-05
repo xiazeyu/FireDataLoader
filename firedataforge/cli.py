@@ -13,7 +13,7 @@ from firedataforge.pipeline import (
     AVAILABLE_LAYERS, LAYER_ALIASES, parse_batch_input, process_batch,
     process_single_fire,
 )
-from schemas import ProcessingArgs
+from firedataforge.schemas import ProcessingArgs
 
 log = logging.getLogger(__name__)
 

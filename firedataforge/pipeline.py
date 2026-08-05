@@ -26,7 +26,7 @@ from firedataforge.sources.gee import (
 from firedataforge.sources.nifc import download_nifc_perimeters
 from firedataforge.sources.weather import download_hrrr, write_data_gap_log
 from firedataforge.sources.wui import download_globalwui
-from schemas import DataLayer, ProcessingArgs
+from firedataforge.schemas import DataLayer, ProcessingArgs
 
 log = logging.getLogger(__name__)
 

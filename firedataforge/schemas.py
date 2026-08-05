@@ -7,7 +7,7 @@ so they can be imported independently in other modules, notebooks, or by
 downstream consumers of the framework's outputs.
 
 Example:
-    from schemas import FireEvent, ProcessingTask, DataLayer, GeoReference
+    from firedataforge.schemas import FireEvent, ProcessingTask, DataLayer, GeoReference
 """
 
 from dataclasses import dataclass, field

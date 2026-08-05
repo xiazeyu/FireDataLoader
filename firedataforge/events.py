@@ -25,7 +25,7 @@ from firedataforge.sources.feds import (
     index_event_gpkgs, read_perimeter_gdf,
 )
 from firedataforge.sources.mtbs import PROVISIONAL_IA, iter_all_events, query_mtbs
-from schemas import FireEvent, ProcessingTask
+from firedataforge.schemas import FireEvent, ProcessingTask
 
 log = logging.getLogger(__name__)
 

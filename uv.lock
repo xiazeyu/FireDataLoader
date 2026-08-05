@@ -618,8 +618,7 @@ wheels = [
 
 [[package]]
 name = "firedataforge"
-version = "0.2.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "affine" },
     { name = "earthengine-api" },
@@ -631,6 +630,11 @@ dependencies = [
     { name = "rioxarray" },
     { name = "scipy" },
     { name = "tqdm" },
+]
+
+[package.optional-dependencies]
+examples = [
+    { name = "matplotlib" },
 ]
 
 [package.dev-dependencies]
@@ -650,12 +654,14 @@ requires-dist = [
     { name = "geemap" },
     { name = "geopandas", extras = ["all"] },
     { name = "herbie-data", extras = ["extras"] },
+    { name = "matplotlib", marker = "extra == 'examples'" },
     { name = "questionary" },
     { name = "rasterio" },
     { name = "rioxarray" },
     { name = "scipy" },
     { name = "tqdm" },
 ]
+provides-extras = ["examples"]
 
 [package.metadata.requires-dev]
 dev = [

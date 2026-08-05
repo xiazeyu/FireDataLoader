@@ -13,7 +13,7 @@ import geemap
 import numpy as np
 from pyproj import Transformer
 
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 log = logging.getLogger(__name__)
 

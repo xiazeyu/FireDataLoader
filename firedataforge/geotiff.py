@@ -8,7 +8,7 @@ and writes ``<event_id>/geotiff/<name>.tif`` beside it, so the pipeline's own
 outputs are unchanged. See ``to_geotiff.py`` for the command-line entry point.
 
 The conversion is lossy in one direction only: GeoTIFF carries the pixels, the
-CRS, and the affine transform, but not the rich :class:`~schemas.DataLayer`
+CRS, and the affine transform, but not the rich :class:`~firedataforge.schemas.DataLayer`
 envelope. Timestamps survive as per-band descriptions and a few scalar fields
 land in GDAL metadata tags; anything needing the full envelope (``note``,
 ``categories``, provenance) should read the ``.npz``.
@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 log = logging.getLogger(__name__)
 

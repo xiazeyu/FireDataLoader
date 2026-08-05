@@ -43,7 +43,7 @@ from typing import Any
 
 import numpy as np
 
-from schemas import SCHEMA_VERSION, DataLayer, GeoReference, ProcessingTask
+from firedataforge.schemas import SCHEMA_VERSION, DataLayer, GeoReference, ProcessingTask
 
 log = logging.getLogger(__name__)
 
@@ -311,7 +311,7 @@ def save_coordinates(
       shape ``(width,)``.
     - ``data[1]``: 1-D array of y (northing/latitude) pixel-center coordinates,
       shape ``(height,)``, ordered top-to-bottom to match raster row order.
-    - ``georeference``: a :class:`~schemas.GeoReference` with ``crs`` (short id,
+    - ``georeference``: a :class:`~firedataforge.schemas.GeoReference` with ``crs`` (short id,
       e.g. ``"EPSG:5070"``), ``crs_wkt`` / ``crs_proj4`` / ``crs_epsg``
       (self-contained CRS definitions for archival / custom-CRS use),
       ``bounds`` (minx, miny, maxx, maxy), ``shape`` (height, width),

@@ -21,7 +21,7 @@ from firedataforge.constants import (
     FIREPIX_CACHE_NAME, FIRMS_API_BASE, FIRMS_API_MAX_DAYS,
     FIRMS_API_SOURCES, FIRMS_CACHE_NAME, FIRMS_FILES, FIRMS_USECOLS,
 )
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 log = logging.getLogger(__name__)
 

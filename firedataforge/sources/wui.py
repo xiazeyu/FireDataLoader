@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from firedataforge.constants import CACHE_DIR, DATASETS_DIR, GLOBALWUI_CACHE_NAME
 from firedataforge.progress import download_to_file
-from schemas import DataLayer, ProcessingTask
+from firedataforge.schemas import DataLayer, ProcessingTask
 
 log = logging.getLogger(__name__)
 

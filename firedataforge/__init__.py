@@ -5,6 +5,7 @@ forge_event`` (or ``import firedataforge as fdf``) without reaching into submodu
 See ``firedataforge.cli`` for the command-line entry point.
 """
 
+from firedataforge.__about__ import __version__
 from firedataforge.config import (
     ensure_ca_bundle, ensure_setup, feds_available, gee_ready, load_env,
     run_setup_wizard,
@@ -24,7 +25,7 @@ from firedataforge.pipeline import (
     forge_event, parse_batch_input, process_batch, process_single_fire,
 )
 from firedataforge.sources.feds import find_event_gpkg
-from schemas import (
+from firedataforge.schemas import (
     DataLayer, FireEvent, GeoReference, ProcessingArgs, ProcessingTask,
 )
 
@@ -44,4 +45,5 @@ __all__ = [
     "ensure_ca_bundle",
     "FireEvent", "ProcessingTask", "ProcessingArgs", "DataLayer", "GeoReference",
     "DEFAULT_FIRE_WINDOW_DAYS",
+    "__version__",
 ]

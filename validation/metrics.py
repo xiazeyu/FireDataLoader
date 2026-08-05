@@ -26,7 +26,7 @@ import numpy as np
 from pyproj import Transformer
 
 import firedataforge as fdf
-from schemas import DataLayer
+from firedataforge.schemas import DataLayer
 
 
 def _load(event_dir: str, name: str) -> Optional[DataLayer]:
@@ -41,7 +41,7 @@ def _task_from_event(event_dir: str):
     if ti is None or not ti.data or not isinstance(ti.data[0], dict):
         return None
     try:
-        from schemas import ProcessingTask
+        from firedataforge.schemas import ProcessingTask
         return ProcessingTask(**ti.data[0])
     except (TypeError, ImportError):
         return None
