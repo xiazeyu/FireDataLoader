@@ -30,13 +30,13 @@ from schemas import DataLayer
 
 
 def _load(event_dir: str, name: str) -> Optional[DataLayer]:
-    """Load ``<event_dir>/<name>.npy`` as a DataLayer, or None if absent."""
-    path = os.path.join(event_dir, f"{name}.npy")
+    """Load ``<event_dir>/<name>.npz`` as a DataLayer, or None if absent."""
+    path = fdf.resolve_path(os.path.join(event_dir, f"{name}{fdf.DATA_EXT}"))
     return fdf.load_numpy(path) if os.path.exists(path) else None
 
 
 def _task_from_event(event_dir: str):
-    """Reconstruct the :class:`ProcessingTask` from an event's ``task_info.npy``."""
+    """Reconstruct the :class:`ProcessingTask` from an event's ``task_info.npz``."""
     ti = _load(event_dir, "task_info")
     if ti is None or not ti.data or not isinstance(ti.data[0], dict):
         return None
@@ -292,7 +292,8 @@ def frp_conservation(event_dir: str) -> dict:
         return {}
     # Mirror the pipeline's source selection: with a FEDS perimeter, pre-2025 fires
     # use the bundled firepix archive; otherwise NASA FIRMS.
-    has_perim = os.path.exists(os.path.join(event_dir, "burn_perimeter.npy"))
+    has_perim = os.path.exists(
+        fdf.resolve_path(os.path.join(event_dir, f"burn_perimeter{fdf.DATA_EXT}")))
     try:
         df = (_load_firepix_data(task) if has_perim and task.year < 2025
               else _load_firms_data(task))

@@ -213,6 +213,7 @@ python main.py --batch events.txt [options]
 | `-t, --interpolation` | Intermediate frames between timesteps | 0 |
 | `--cache_dir` | Root directory for all on-the-fly downloads (HRRR, FIRMS, FEDS, firepix, WUI, fire list); each caches under its own fixed subfolder | cache |
 | `--only` | Only process specific feature(s), comma-separated | all |
+| `--convert-legacy` | Rewrite FireDataForge 0.1's pickled `.npy` layers under a directory as `.npz` (recursive), then exit | - |
 | `-v, --verbose` | Enable verbose logging | False |
 
 #### Available Features for `--only`
@@ -301,36 +302,79 @@ The batch summary is saved to `output/batch_summary.json`.
 
 ## Output
 
-Data is saved as `.npy` files in `output/<event_id>/`:
+Data is saved as compressed `.npz` files in `output/<event_id>/`, one per layer:
 
 ```
 output/CA3432611848120191010/
 ├── task_summary.json     # Per-layer outcome (ok / skipped / failed) + reasons + metadata
-├── task_info.npy         # Processing configuration
-├── coordinates.npy       # Pixel-center x/y coordinates + CRS for the grid
-├── burn_perimeter.npy    # Fire perimeter time series
-├── fireline.npy          # Active fireline time series (perimeter differences)
-├── fireline_max_frp.npy  # Max FRP painted onto each fireline segment
-├── frp_daytime.npy       # Daytime Fire Radiative Power (MW)
-├── frp_nighttime.npy     # Nighttime Fire Radiative Power (MW)
-├── elevation.npy         # Terrain elevation
-├── canopy_bulk_density.npy  # Canopy Bulk Density
-├── canopy_cover.npy      # Canopy Cover
-├── recent_burn.npy       # Most-recent burn year per pixel (NIFC IFPH, NaN = unburned)
-├── r2.npy                # Relative humidity
-├── u10.npy               # Wind U component
-├── v10.npy               # Wind V component
-├── building_height.npy   # Building heights
-├── landcover.npy         # Land cover classes
-├── lai.npy               # Leaf Area Index
-├── sentinel2_rgb.npy     # RGB Sentinel-2 cloudless mosaic
-├── terrain_rgb.npy       # Colored shaded-relief terrain RGB (H, W, 3)
-└── wui.npy               # Wildland-Urban Interface classification
+├── task_info.npz         # Processing configuration
+├── coordinates.npz       # Pixel-center x/y coordinates + CRS for the grid
+├── burn_perimeter.npz    # Fire perimeter time series
+├── fireline.npz          # Active fireline time series (perimeter differences)
+├── fireline_max_frp.npz  # Max FRP painted onto each fireline segment
+├── frp_daytime.npz       # Daytime Fire Radiative Power (MW)
+├── frp_nighttime.npz     # Nighttime Fire Radiative Power (MW)
+├── elevation.npz         # Terrain elevation
+├── canopy_bulk_density.npz  # Canopy Bulk Density
+├── canopy_cover.npz      # Canopy Cover
+├── recent_burn.npz       # Most-recent burn year per pixel (NIFC IFPH, NaN = unburned)
+├── r2.npz                # Relative humidity
+├── u10.npz               # Wind U component
+├── v10.npz               # Wind V component
+├── building_height.npz   # Building heights
+├── landcover.npz         # Land cover classes
+├── lai.npz               # Leaf Area Index
+├── sentinel2_rgb.npz     # RGB Sentinel-2 cloudless mosaic
+├── terrain_rgb.npz       # Colored shaded-relief terrain RGB (H, W, 3)
+└── wui.npz               # Wildland-Urban Interface classification
 ```
 
 Only the layers that were successfully produced are written; any that were skipped
 or failed are omitted from the directory but **always recorded** in
 `task_summary.json` with the reason.
+
+```python
+import json, numpy as np
+
+f = np.load('output/CA3432611848120191010/frp_daytime.npz')
+cube = f['data']                    # (T, H, W) float32 — frames stacked
+meta = json.loads(str(f['meta']))   # source, unit, timestamps, note, ...
+```
+
+> **Changed in 0.2.** FireDataForge 0.1 wrote one pickled `.npy` per layer, which
+> required `allow_pickle=True` to read. 0.2 writes `.npz` (`SCHEMA_VERSION` 2.0);
+> the `DataLayer` fields are unchanged, only the container. `load_numpy` still
+> reads 0.1 files, and either extension resolves to whichever exists — so
+> `load_numpy('.../elevation.npy')` finds `elevation.npz`. To migrate an existing
+> output tree in place:
+>
+> ```bash
+> python main.py --convert-legacy output/
+> ```
+>
+> This walks the tree recursively, writes a `.npz` beside each `.npy`, and leaves
+> the originals alone so you can verify before deleting them. Expect roughly a
+> **5× size reduction** — the categorical and sparse fire layers compress far
+> better than that.
+
+### Opening layers in QGIS/ArcGIS
+
+The `.npz` files are compact and load in one line, but GIS desktop tools can't
+read them. `to_geotiff.py` converts a finished output tree without touching it:
+
+```bash
+python to_geotiff.py output/                       # every event in a tree
+python to_geotiff.py output/CA3432611848120191010  # one event
+```
+
+Each raster layer becomes `output/<event_id>/geotiff/<name>.tif`, with one band
+per frame and the observation timestamp as the band description — so a 9-frame
+`frp_daytime` is a 9-band GeoTIFF. The weather layers keep their own coarser
+grid, georeferenced from the shared bounds and their own array shape.
+
+GeoTIFF carries the pixels, CRS, and affine transform, but **not** the full
+`DataLayer` envelope (`note`, `categories`, provenance) — the `.npz` files remain
+the canonical output.
 
 <details>
 <summary><strong>Task summary</strong> (<code>task_summary.json</code>) — per-layer outcome schema</summary>
@@ -350,8 +394,8 @@ layer, so a partial run is self-documenting:
   "notes": ["t_end is an estimate (t_start + 15 days): no FEDS perimeter ...",
             "aoi_mode fell back to 'bbox' from 'tight': this event has no FEDS ..."],
   "layers": {
-    "elevation":      {"status": "ok",      "files": ["elevation.npy"]},
-    "frp_daytime":    {"status": "ok",      "files": ["frp_daytime.npy"], "n_frames": 7},
+    "elevation":      {"status": "ok",      "files": ["elevation.npz"]},
+    "frp_daytime":    {"status": "ok",      "files": ["frp_daytime.npz"], "n_frames": 7},
     "burn_perimeter": {"status": "skipped", "reason": "no local FEDS archive"},
     "wui":            {"status": "failed",  "reason": "..."}
   },
@@ -373,26 +417,26 @@ reproducible from its own metadata.
 </details>
 
 <details>
-<summary><strong>Grid coordinates</strong> (<code>coordinates.npy</code>) — georeferencing the saved arrays</summary>
+<summary><strong>Grid coordinates</strong> (<code>coordinates.npz</code>) — georeferencing the saved arrays</summary>
 
-Every event directory also contains `coordinates.npy`, which stores the
+Every event directory also contains `coordinates.npz`, which stores the
 pixel-center coordinates of the common output grid together with the CRS.
-Almost all raster layers (`elevation.npy`, `frp_*.npy`, `wui.npy`, ...) are
+Almost all raster layers (`elevation.npz`, `frp_*.npz`, `wui.npz`, ...) are
 sampled on this exact grid, so this file is the single source of truth for
 georeferencing the arrays — useful for wrapping outputs into `xarray`
 DataArrays or re-projecting them when preparing publication figures.
 
-> **Weather layers are the exception.** `r2.npy`, `u10.npy`, and `v10.npy`
+> **Weather layers are the exception.** `r2.npz`, `u10.npz`, and `v10.npz`
 > (HRRR) share the same `bounds` and `crs` but sit on a coarser ~500 m grid
 > (HRRR is ~3 km natively; resampling an hourly series to 30 m would bloat the
 > files for no added detail). Each records its grid size in
 > `current_resolution`; reconstruct their grid from the shared `bounds` and the
-> array's own shape, not from `coordinates.npy`.
+> array's own shape, not from `coordinates.npz`.
 
 ```python
 from main import load_numpy
 
-coords = load_numpy('output/CA3432611848120191010/coordinates.npy')
+coords = load_numpy('output/CA3432611848120191010/coordinates.npz')
 x, y = coords.data                  # 1-D arrays, shape (width,) and (height,)
 geo = coords.georeference           # typed GeoReference (see schemas.py)
 crs = geo.crs                       # e.g. 'EPSG:5070'
@@ -415,10 +459,11 @@ saved rasters.
 </details>
 
 <details>
-<summary><strong>Array shapes &amp; dtypes</strong> — what each <code>.npy</code> holds</summary>
+<summary><strong>Array shapes &amp; dtypes</strong> — what each <code>.npz</code> holds</summary>
 
-Every `.npy` (except `task_info.npy`) loads via `load_numpy` into a `DataLayer`
-whose `.data` is **always a list of frames** (`schemas.py`). The frame rank and
+Every `.npz` (except `task_info.npz`) loads via `load_numpy` into a `DataLayer`
+whose `.data` is **always a list of frames** (`schemas.py`) — on disk those
+frames are the `(T, ...)` stack under the file's `data` key. The frame rank and
 the number of frames follow the layer's type:
 
 | Layer kind | Layers | `len(data)` | Frame shape | dtype |
@@ -432,7 +477,7 @@ the number of frames follow the layer's type:
 | RGB visualization | `sentinel2_rgb`, `terrain_rgb` | 1 | `(H, W, 3)` | uint8 |
 | Coordinates | `coordinates` | 2 | `[x: (W,), y: (H,)]` | float |
 
-`(H, W)` is the common grid in `coordinates.npy` for every layer **except** the
+`(H, W)` is the common grid in `coordinates.npz` for every layer **except** the
 HRRR fields (`r2`/`u10`/`v10`), which sit on a coarser `(h, w)` grid recorded in
 their `current_resolution` — derive it from the shared `bounds` and the array's
 own shape. For time-varying layers `data[i]` is the frame observed at
@@ -493,7 +538,7 @@ python plot.py --batch CA123,CA456,CA789
 from main import load_numpy
 
 # Load a data file
-data = load_numpy('output/CA3432611848120191010/elevation.npy')
+data = load_numpy('output/CA3432611848120191010/elevation.npz')
 print(data.name)        # 'elevation'
 print(data.data[0].shape)  # (height, width)
 print(data.unit)        # 'm'
@@ -553,11 +598,13 @@ entry point that re-exports the public API.
 main.py                  CLI entry point + backward-compatible import surface
 schemas.py               public data contract — stdlib-only output dataclasses
 plot.py                  visualization of saved layers
+to_geotiff.py            convert saved layers to GeoTIFF for QGIS/ArcGIS
 firedataforge/
 ├── constants.py         paths + source-API constants
 ├── config.py            credentials, first-run wizard, dataset discovery
 ├── events.py            fire-list resolution + ProcessingTask (grid + time window)
-├── io.py                .npy + coordinate persistence
+├── io.py                .npz + coordinate persistence
+├── geotiff.py           .npz -> GeoTIFF conversion (see to_geotiff.py)
 ├── pipeline.py          fail-soft per-event / batch orchestration + task summaries
 ├── cli.py               argument parsing
 ├── examples.py          --fetch-examples: download the example bundle from Zenodo
@@ -684,10 +731,10 @@ perimeter (`firedataforge/sources/frp.py`). Consequences:
   observations in that window degrades to the layer-level fail-soft case above rather
   than emitting empty frames.
 
-Beyond gaps, every `.npy` envelope is self-describing: it carries `source`
+Beyond gaps, every `.npz` envelope is self-describing: it carries `source`
 (provenance/attribution), `unit`, `native_resolution` (the source's resolution in
 **meters**), `timestamps`, and — for categorical layers — a `categories` map,
-while the grid CRS/transform lives in `coordinates.npy`. See
+while the grid CRS/transform lives in `coordinates.npz`. See
 [Data contract (`schemas.py`)](#data-contract-schemaspy).
 
 ## Available Fire Events

@@ -13,7 +13,7 @@ from tqdm import tqdm
 from firedataforge.config import _firms_map_key, gee_ready
 from firedataforge.constants import DEFAULT_FIRE_WINDOW_DAYS, FIRELIST_CACHE_NAME
 from firedataforge.events import get_fire_info, get_task_info
-from firedataforge.io import save_coordinates, save_numpy
+from firedataforge.io import DATA_EXT, save_coordinates, save_numpy
 from firedataforge.sources.feds import (
     find_event_gpkg, interpolate_burn_perimeter, process_feds25mtbs,
     process_fireline, process_fireline_max_frp,
@@ -89,8 +89,8 @@ def process_single_fire(
     Each layer is produced independently: a missing dependency (no FEDS archive,
     no Earth Engine, no FIRMS key) or a failed/maintenance-down service is recorded
     and skipped without affecting the other layers. Outputs are written under
-    ``args.output_dir/<event_id>/`` as one ``.npy`` per layer plus
-    ``coordinates.npy``, ``task_info.npy``, and a ``task_summary.json`` recording
+    ``args.output_dir/<event_id>/`` as one ``.npz`` per layer plus
+    ``coordinates.npz``, ``task_info.npz``, and a ``task_summary.json`` recording
     each layer's status (``ok`` / ``skipped`` / ``failed``) and reason.
 
     Args:
@@ -183,7 +183,7 @@ def process_single_fire(
             entry["reason"] = reason
         layers = _normalize_layers(layers)
         if layers:
-            entry["files"] = [f"{layer.name}.npy" for layer in layers]
+            entry["files"] = [f"{layer.name}{DATA_EXT}" for layer in layers]
             if layers[0].timestamps is not None:
                 entry["n_frames"] = len(layers[0].data)
         summary["layers"][key] = entry

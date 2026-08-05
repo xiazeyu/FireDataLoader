@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm, TwoSlopeNorm
 import numpy as np
 
-from main import load_numpy
+from main import DATA_EXT, layer_files, load_numpy, resolve_path
 
 # ESA WorldCover land cover classes
 LANDCOVER_CLASSES = {
@@ -277,18 +277,15 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
         print(f"Error: Directory not found: {event_path}")
         sys.exit(1)
     
-    # Find all .npy files
-    npy_files = sorted([f for f in os.listdir(event_path) if f.endswith('.npy')])
-    
-    if not npy_files:
-        print(f"Error: No .npy files found in {event_path}")
-        sys.exit(1)
-    
-    print(f"Found {len(npy_files)} data files for event: {event_id}")
+    # Find all raster layer files (task_info / coordinates are already excluded)
+    data_files = [os.path.basename(p) for p in layer_files(event_path)]
 
-    # Skip task_info and coordinates (not raster layers) for plotting
-    data_files = [f for f in npy_files if f not in ('task_info.npy', 'coordinates.npy')]
-    
+    if not data_files:
+        print(f"Error: No layer files found in {event_path}")
+        sys.exit(1)
+
+    print(f"Found {len(data_files)} data files for event: {event_id}")
+
     # Optionally filter to a user-specified subset of features
     if features:
         requested = [f.strip() for f in features if f.strip()]
@@ -307,8 +304,8 @@ def plot_event_data(event_id: str, output_dir: str = 'output', show: bool = Fals
     # it actually has more than one frame. Peek at its frame count so the grid
     # reserves the extra cell only when it will be filled.
     extra_plots = 0
-    if 'burn_perimeter.npy' in data_files:
-        bp = load_numpy(os.path.join(event_path, 'burn_perimeter.npy'))
+    if any(os.path.splitext(f)[0] == 'burn_perimeter' for f in data_files):
+        bp = load_numpy(os.path.join(event_path, f'burn_perimeter{DATA_EXT}'))
         if bp.data and len(bp.data) > 1:
             extra_plots = 1
     n_plots = len(data_files) + extra_plots
@@ -424,11 +421,12 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output',
     """Plot all frames of a time series layer.
 
     If ``data_obj`` is provided it is used directly; otherwise the layer's
-    ``.npy`` file is loaded from disk. Passing a preloaded object lets callers
+    ``.npz`` file is loaded from disk. Passing a preloaded object lets callers
     (e.g. plot_all_time_series) avoid re-reading the file.
     """
     if data_obj is None:
-        filepath = os.path.join(output_dir, event_id, f'{layer_name}.npy')
+        filepath = resolve_path(
+            os.path.join(output_dir, event_id, f'{layer_name}{DATA_EXT}'))
 
         if not os.path.exists(filepath):
             print(f"Error: File not found: {filepath}")
@@ -510,7 +508,7 @@ def plot_time_series(event_id: str, layer_name: str, output_dir: str = 'output',
 def plot_all_time_series(event_id: str, output_dir: str = 'output', show: bool = False):
     """Plot a time series figure for every multi-frame layer of an event.
 
-    Scans the event's ``.npy`` files and renders one time-series PNG per layer
+    Scans the event's layer files and renders one time-series PNG per layer
     that has more than one frame. Single-frame (static) layers are skipped.
     """
     event_path = os.path.join(output_dir, event_id)
@@ -518,17 +516,14 @@ def plot_all_time_series(event_id: str, output_dir: str = 'output', show: bool =
         print(f'Error: Directory not found: {event_path}')
         sys.exit(1)
 
-    npy_files = sorted(
-        f for f in os.listdir(event_path)
-        if f.endswith('.npy') and f not in ('task_info.npy', 'coordinates.npy')
-    )
-    if not npy_files:
-        print(f'Error: No .npy files found in {event_path}')
+    paths = layer_files(event_path)
+    if not paths:
+        print(f'Error: No layer files found in {event_path}')
         sys.exit(1)
 
     plotted = 0
-    for filename in npy_files:
-        data_obj = load_numpy(os.path.join(event_path, filename))
+    for path in paths:
+        data_obj = load_numpy(path)
         if data_obj.data and len(data_obj.data) > 1:
             plot_time_series(event_id, data_obj.name, output_dir, show,
                              data_obj=data_obj)
@@ -595,22 +590,18 @@ def plot_all_channels(event_id: str, output_dir: str = 'output'):
         print(f'Error: Directory not found: {event_path}')
         sys.exit(1)
 
-    npy_files = sorted(
-        f for f in os.listdir(event_path)
-        if f.endswith('.npy') and f not in ('task_info.npy', 'coordinates.npy')
-    )
-    if not npy_files:
-        print(f'Error: No .npy files found in {event_path}')
+    paths = layer_files(event_path)
+    if not paths:
+        print(f'Error: No layer files found in {event_path}')
         sys.exit(1)
 
-    print(f'Plotting {len(npy_files)} channels for event: {event_id}')
+    print(f'Plotting {len(paths)} channels for event: {event_id}')
 
-    for filename in npy_files:
-        filepath = os.path.join(event_path, filename)
-        data_obj = load_numpy(filepath)
+    for path in paths:
+        data_obj = load_numpy(path)
         plot_channel(event_id, data_obj, data_obj.name, event_path)
 
-    print(f'\nDone — {len(npy_files)} channel PNGs saved to {event_path}')
+    print(f'\nDone — {len(paths)} channel PNGs saved to {event_path}')
 
 
 def plot_event(event_id: str, output_dir: str = 'output', show: bool = False,

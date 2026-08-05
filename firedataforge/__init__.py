@@ -15,7 +15,11 @@ from firedataforge.events import (
     validate_projected_crs,
 )
 from firedataforge.examples import fetch_examples
-from firedataforge.io import load_numpy, save_coordinates, save_numpy
+from firedataforge.geotiff import export_event_dir, export_layer, export_tree
+from firedataforge.io import (
+    DATA_EXT, convert_legacy_dir, layer_files, load_numpy, resolve_path,
+    save_coordinates, save_numpy,
+)
 from firedataforge.pipeline import (
     forge_event, parse_batch_input, process_batch, process_single_fire,
 )
@@ -34,6 +38,8 @@ __all__ = [
     "get_fire_info", "get_task_info", "validate_projected_crs",
     "find_event_gpkg", "read_feds_firelist",
     "build_firelist", "fetch_examples", "load_numpy", "save_numpy", "save_coordinates",
+    "layer_files", "resolve_path", "convert_legacy_dir", "DATA_EXT",
+    "export_layer", "export_event_dir", "export_tree",
     "gee_ready", "feds_available", "run_setup_wizard", "ensure_setup", "load_env",
     "ensure_ca_bundle",
     "FireEvent", "ProcessingTask", "ProcessingArgs", "DataLayer", "GeoReference",

@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-SCHEMA_VERSION = "1.1"
+# 1.0 (FireDataForge 0.1): initial release.
+# 1.1 (FireDataForge 0.1): added ``aoi_wkt`` to ``FireEvent`` for FEDS perimeter geometry.
+# 2.0 (FireDataForge 0.2): layers are persisted as pickle-free ``.npz``.
+SCHEMA_VERSION = "2.0"
 
 
 @dataclass
@@ -87,8 +90,8 @@ class GeoReference:
     Captures everything a consumer needs to place the raster arrays in space
     without an external EPSG lookup or network access. Almost every raster layer
     in an event directory is sampled on this exact grid, so a single
-    ``GeoReference`` (persisted in ``coordinates.npy``) georeferences all the
-    other ``.npy`` layers; per-layer envelopes leave
+    ``GeoReference`` (persisted in ``coordinates.npz``) georeferences all the
+    other ``.npz`` layers; per-layer envelopes leave
     :attr:`DataLayer.georeference` as ``None`` and inherit it. The HRRR weather
     layers (``r2``/``u10``/``v10``) are the exception: they share these
     ``bounds`` and ``crs`` but sit on a coarser grid (see
@@ -140,7 +143,7 @@ class DataLayer:
           (e.g. ``coordinates``).
 
     Attributes:
-        name: Layer identifier; also the output file stem (``<name>.npy``).
+        name: Layer identifier; also the output file stem (``<name>.npz``).
         data: List of payloads (see invariants above).
         version: Schema version of this envelope (see :data:`SCHEMA_VERSION`).
         timestamps: Per-frame datetimes parallel to ``data``, or ``None``.
@@ -151,9 +154,9 @@ class DataLayer:
         current_resolution: Spatial resolution in meters of the grid the array is
             currently sampled on. Usually :attr:`ProcessingTask.resolution` (the
             common output grid); the HRRR weather layers keep their own coarser
-            grid (~500 m) and record that here instead. Lets a single ``.npy``
+            grid (~500 m) and record that here instead. Lets a single ``.npz``
             describe both its true and grid resolution without loading
-            ``coordinates.npy``.
+            ``coordinates.npz``.
         unit: Unit of measurement for the data values.
         categories: For categorical layers, a mapping from integer pixel value
             to class label (e.g. land-cover or WUI classes); ``None`` otherwise.

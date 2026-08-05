@@ -83,7 +83,7 @@ appended per run:
 (`shape`, `resolution_m`, `perimeter_frames`, `hrrr_frames`, `counts`,
 `t_start`, `t_end`) are copied from each event's `task_summary.json` when the
 run produced one. Per-run stdout/stderr is captured under `logs/`, and the heavy
-`.npy` cube outputs written under `out/` are deleted after each run once the
+`.npz` cube outputs written under `out/` are deleted after each run once the
 summary has been recorded.
 
 `results.jsonl`, `logs/`, and `out/` are generated artifacts and are

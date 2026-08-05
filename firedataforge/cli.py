@@ -64,6 +64,11 @@ def main() -> None:
                         help="Root directory for all on-the-fly downloads "
                              "(HRRR, FIRMS, FEDS, firepix, WUI, fire list); each "
                              "caches under its own fixed subfolder of this root")
+    parser.add_argument("--convert-legacy", dest="convert_legacy", type=str,
+                        default=None, metavar="DIR",
+                        help="Rewrite FireDataForge 0.1's pickled .npy layers "
+                             "under DIR as .npz (recursive; accepts one event "
+                             "dir or a whole output tree), then exit")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Verbose (DEBUG) logging")
     parser.add_argument("--only", type=str, default=None,
@@ -79,6 +84,13 @@ def main() -> None:
 
     # Stand-alone maintenance commands.
     load_env()
+    if args.convert_legacy:
+        from firedataforge.io import convert_legacy_dir
+        n = convert_legacy_dir(args.convert_legacy)
+        log.info(f"Converted {n} legacy .npy layer(s) under "
+                 f"{args.convert_legacy} to .npz "
+                 f"(originals left in place; delete them once verified)")
+        return
     if args.setup:
         run_setup_wizard()
         return

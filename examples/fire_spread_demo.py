@@ -31,8 +31,8 @@ print("event:", EVENT)
 # %% Load the harmonized layers: terrain, fuel, wind, and an ignition source.
 # They're already on one common grid, so they stack with no reprojection on our part.
 def layer(name):
-    """First frame of one .npy layer as a float array (or None if not produced)."""
-    path = os.path.join(EVENT, f"{name}.npy")
+    """First frame of one layer as a float array (or None if not produced)."""
+    path = fdf.resolve_path(os.path.join(EVENT, f"{name}{fdf.DATA_EXT}"))
     return np.asarray(fdf.load_numpy(path).data[0], float) if os.path.exists(path) else None
 
 

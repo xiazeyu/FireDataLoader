@@ -35,7 +35,7 @@ def load_event_stack(event_dir, channels=CHANNELS):
     """
     arrays, names = [], []
     for name in channels:
-        path = os.path.join(event_dir, f"{name}.npy")
+        path = fdf.resolve_path(os.path.join(event_dir, f"{name}{fdf.DATA_EXT}"))
         if not os.path.exists(path):
             continue
         frame = np.asarray(fdf.load_numpy(path).data[0], np.float32)

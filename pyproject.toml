@@ -1,6 +1,6 @@
 [project]
 name = "firedataforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "FireDataForge turns one MTBS fire ID into a stack of harmonized, analysis-ready geospatial layers (perimeters, FRP, terrain, fuels, weather, and more) from many sources."
 readme = "README.md"
 requires-python = ">=3.12"

@@ -71,7 +71,7 @@ def run_event(event, regime, rep):
             "t_start": s.get("t_start"),
             "t_end": s.get("t_end"),
         })
-    # Summary already captured in `rec`; drop the heavy .npy outputs on disk.
+    # Summary already captured in `rec`; drop the heavy .npz outputs on disk.
     shutil.rmtree(out_dir, ignore_errors=True)
     with open(RESULTS, "a") as fh:
         fh.write(json.dumps(rec) + "\n")

@@ -9,9 +9,10 @@
 
 from firedataforge import *  # noqa: F401,F403  (re-export the public API)
 from firedataforge import (  # noqa: F401  (explicit names for `import main` users)
-    build_firelist, feds_available, fetch_examples, find_event_gpkg, forge_event,
-    gee_ready, get_fire_info, get_task_info, load_numpy, parse_batch_input,
-    process_batch, process_single_fire, save_coordinates, save_numpy,
+    DATA_EXT, build_firelist, convert_legacy_dir, feds_available, fetch_examples,
+    find_event_gpkg, forge_event, gee_ready, get_fire_info, get_task_info,
+    layer_files, load_numpy, parse_batch_input, process_batch, process_single_fire,
+    resolve_path, save_coordinates, save_numpy,
 )
 from firedataforge.cli import main
 
