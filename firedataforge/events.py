@@ -13,7 +13,7 @@ import pandas as pd
 from shapely.geometry import box
 from tqdm import tqdm
 
-from firedataforge.config import find_feds_firelist
+from firedataforge.config import find_feds_firelist, metadata_priority
 from firedataforge.constants import (
     CACHE_DIR, DEFAULT_FIRE_WINDOW_DAYS,
     DEFAULT_FIRELIST_CACHE, FEDS_DIR,
@@ -382,7 +382,15 @@ def get_fire_info(
     the name/acreage come from the first fire-list/online source that has the event
     (FEDS-MTBS fire list, then the offline MTBS list, then the live service), while
     the GeoPackage -- when present -- supplies the bounds and the active-burning
-    window, refined in :func:`_resolve_fire_event`:
+    window, refined in :func:`_resolve_fire_event`.
+
+    The name/acreage chain (sources 1-3 below) is what the setup wizard's step
+    [5/5] configures: :func:`~firedataforge.config.metadata_priority` reads the
+    ticked sources, in the order they were ticked, from
+    ``FIREDATAFORGE_METADATA_PRIORITY`` in ``.env``. Untick a source and it is
+    skipped entirely; the live lookup is always kept as the last resort. With no
+    setting the documented default order below applies. The GeoPackage-driven
+    refinements are unaffected:
 
     * **bounds:** ``FEDS GeoPackage perimeter > fire-list bbox > MTBS bbox``.
     * **t_end:** ``FEDS GeoPackage progression > example-list ted > fallback window``.
@@ -424,29 +432,37 @@ def get_fire_info(
     Raises:
         RuntimeError: If the event cannot be resolved from any source.
     """
-    # 1. Local FEDS-MTBS fire list (released GeoPackage or example CSV).
-    record = read_feds_firelist().get(event_id)
-    if record is not None and record.get("bounds") is not None:
-        log.info(f"Resolved {event_id} from the FEDS25MTBS fire list")
-        return _resolve_fire_event(event_id, record, cache_dir=cache_dir)
+    # Sources 1-3, in the order configured by the setup wizard's step [5/5].
+    for source in metadata_priority():
+        if source == "feds":
+            # 1. Local FEDS-MTBS fire list (released GeoPackage or example CSV).
+            record = read_feds_firelist().get(event_id)
+            if record is not None and record.get("bounds") is not None:
+                log.info(f"Resolved {event_id} from the FEDS25MTBS fire list")
+                return _resolve_fire_event(event_id, record, cache_dir=cache_dir)
 
-    # 2. Self-built offline MTBS cache (mtbs_firelist.csv).
-    record = _read_fire_cache(firelist_cache).get(event_id)
-    if record is not None and record.get("bounds") is not None:
-        log.info(f"Resolved {event_id} from the offline fire-list cache ({firelist_cache})")
-        return _resolve_fire_event(event_id, record, cache_dir=cache_dir)
+        elif source == "mtbs":
+            # 2. Self-built offline MTBS cache (mtbs_firelist.csv).
+            record = _read_fire_cache(firelist_cache).get(event_id)
+            if record is not None and record.get("bounds") is not None:
+                log.info(
+                    f"Resolved {event_id} from the offline fire-list cache "
+                    f"({firelist_cache})")
+                return _resolve_fire_event(event_id, record, cache_dir=cache_dir)
 
-    # 3. Live MTBS service (+ Provisional IA); append the result to the cache.
-    if use_mtbs_api:
-        record = query_mtbs(event_id)
-        if record is not None:
-            log.info(f"Resolved {event_id} from the live MTBS / Provisional IA service")
-            if update_cache and firelist_cache:
-                try:
-                    _append_to_firelist_cache(event_id, record, firelist_cache)
-                except Exception as exc:  # pragma: no cover - best effort
-                    log.warning(f"Could not append {event_id} to {firelist_cache}: {exc}")
-            return _resolve_fire_event(event_id, record, cache_dir=cache_dir)
+        elif source == "live" and use_mtbs_api:
+            # 3. Live MTBS service (+ Provisional IA); cache it for next time.
+            record = query_mtbs(event_id)
+            if record is not None:
+                log.info(
+                    f"Resolved {event_id} from the live MTBS / Provisional IA service")
+                if update_cache and firelist_cache:
+                    try:
+                        _append_to_firelist_cache(event_id, record, firelist_cache)
+                    except Exception as exc:  # pragma: no cover - best effort
+                        log.warning(
+                            f"Could not append {event_id} to {firelist_cache}: {exc}")
+                return _resolve_fire_event(event_id, record, cache_dir=cache_dir)
 
     # 4. No fire-list/online metadata, but a local (or fetchable) FEDS GeoPackage
     #    can still drive the run: it supplies the bounds and the active-burning
@@ -465,11 +481,12 @@ def get_fire_info(
 
     # Not found anywhere.
     raise RuntimeError(
-        f"Cannot resolve {event_id}: not in the FEDS-MTBS fire list, not in the "
-        f"offline MTBS cache ({firelist_cache}), not returned by the live MTBS "
-        f"service, and no FEDS GeoPackage is available. Build the offline list with "
-        f"`python main.py --build-firelist`, or verify the Event ID at "
-        f"https://www.mtbs.gov/."
+        f"Cannot resolve {event_id}: none of the enabled metadata sources "
+        f"({' > '.join(metadata_priority())}) has it -- FEDS-MTBS fire list, offline "
+        f"MTBS cache ({firelist_cache}), live MTBS service -- and no FEDS GeoPackage "
+        f"is available. Re-run `python main.py --setup` to enable more sources, build "
+        f"the offline list with `python main.py --build-firelist`, or verify the "
+        f"Event ID at https://www.mtbs.gov/."
     )
 
 

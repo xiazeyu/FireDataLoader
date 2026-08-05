@@ -81,10 +81,10 @@ is still produced, a warning is logged, and the reason is written to the per-eve
 `task_summary.json`.
 
 For the FEDS-MTBS and Global WUI datasets the wizard also asks how you want the
-data on disk: **full download** (the whole archive is fetched and unpacked into
-`datasets/`, trading disk for bandwidth on repeated runs) or **on-the-fly** (only
-the bits each fire needs are fetched into `cache/` as you go). Either way nothing
-needs to be pre-staged by hand.
+data on disk, as an arrow-key menu (↑/↓ to move, Enter to confirm): **on-the-fly**
+(only the bits each fire needs are fetched into `cache/` as you go), **full
+download** (the whole archive is fetched and unpacked into `datasets/`, trading disk for bandwidth on repeated runs), or **manual** (you unzip
+it yourself and the wizard downloads nothing).
 
 > **Two on-disk buckets** (both optional):
 > - `datasets/` — **user-managed**. Full archives you deliberately download (via
@@ -100,7 +100,8 @@ The wizard's final step lets you choose where each fire's **name + acreage** com
 from — the FEDS-MTBS fire list (Zenodo, FEDS-aligned acreage, 2012–2024, ~280 MB),
 a built-once **offline MTBS fire list** (`python main.py --build-firelist`,
 mtbs.gov, more recent), or live on-the-fly lookups — since the GeoPackage already
-supplies everything else. See the
+supplies everything else. It is a **multi-select** (Space to tick, Enter to confirm): every ticked source is staged, and their top-to-bottom order becomes the
+runtime lookup order. The live on-the-fly lookup is locked on as the mandatory fallback. See the
 [resolution table](#how-an-event-id-is-resolved) for the tradeoffs.
 
 </details>
@@ -144,6 +145,17 @@ Pre-2025 events use FEDS firepix and need no key.
 
 No credential needed — each fire is streamed on demand. To pre-stage the examples
 or download the full archive, see [FEDS-MTBS Dataset](#feds-mtbs-dataset).
+
+**Fire name / acreage lookup order**
+
+Set the chain by hand instead of using the wizard's step 5: a comma-separated
+list of `feds` (FEDS-MTBS fire list), `mtbs` (offline MTBS list) and `live`
+(mtbs.gov), in priority order. Omit a source to skip it; `live` is always appended as the fallback. Unset means all three in the default order.
+
+```bash
+# ...in .env:
+FIREDATAFORGE_METADATA_PRIORITY=feds,mtbs,live
+```
 
 </details>
 
@@ -765,8 +777,8 @@ precedence: `t_end` comes from the progression (tightest), then the example list
 bbox, then the MTBS bbox. So the gpkg alone supplies the window and bounds — the
 fire list mainly adds the display **name** and **acreage** for offline use.
 
-Because the name/acreage are all the fire list adds, the source is your choice
-(the setup wizard's step 5 stages it, or pick by what you place in
+Because the name/acreage are all the fire list adds, the sources are your choice
+(tick any combination in the setup wizard's step 5, or pick by what you place in
 `datasets/FEDS25MTBS/`):
 
 | Source | Acreage | Coverage | Reliability / cost |
@@ -776,6 +788,12 @@ Because the name/acreage are all the fire list adds, the source is your choice
 | **On-the-fly** (live `mtbs.gov`) | MTBS (not FEDS-aligned) | most up-to-date | per-event network, least reliable |
 
 If none is available, the run still proceeds with the **Event ID** as the name.
+
+The MTBS list earns its place on the fires FEDS-MTBS does **not** cover (pre-2012
+/ post-2024): there is no perimeter GeoPackage for those, so `burn_perimeter`,
+`fireline` and `fireline_max_frp` are skipped ("no local FEDS archive") and `t_end`
+falls back to the estimated window, but every other layer (GEE, FIRMS FRP, WUI,
+NIFC recent burns, HRRR weather) still runs, gridded on the MTBS burn-boundary bbox.
 
 ### Data Setup
 

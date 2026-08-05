@@ -7,6 +7,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Optional
 
@@ -35,6 +36,35 @@ FIRMS_FEATURES = ["frp_daytime", "frp_nighttime"]
 FEDS_FEATURES = ["burn_perimeter", "fireline", "fireline_max_frp"]
 # Features that need no credentials at all (shown for reassurance).
 FREE_FEATURES = ["wui", "recent_burn", "r2", "u10", "v10"]
+
+# Name/acreage lookup chain chosen in step [5/5], persisted in ``.env`` as a
+# comma-separated list of source keys in priority order.
+METADATA_PRIORITY_VAR = "FIREDATAFORGE_METADATA_PRIORITY"
+METADATA_SOURCES = ("feds", "mtbs", "live")
+# The live mtbs.gov lookup stages nothing and is always available, so it is the
+# forced fallback: the wizard locks it on and :func:`metadata_priority` re-appends
+# it if a hand-edited ``.env`` leaves it out.
+METADATA_FALLBACK = "live"
+
+
+def metadata_priority() -> list[str]:
+    """Return the name/acreage source order chosen in step [5/5].
+
+    Unset or unparseable values fall back to every source in the documented
+    default order. ``live`` is always present as the last resort.
+    """
+    raw = os.environ.get(METADATA_PRIORITY_VAR, "")
+    order = [
+        key for key in (p.strip().lower() for p in raw.split(","))
+        if key in METADATA_SOURCES
+    ]
+    # De-duplicate while keeping the first occurrence of each source.
+    order = list(dict.fromkeys(order))
+    if not order:
+        return list(METADATA_SOURCES)
+    if METADATA_FALLBACK not in order:
+        order.append(METADATA_FALLBACK)
+    return order
 
 
 def _parse_env_file(path: str) -> dict[str, str]:
@@ -146,6 +176,91 @@ def _yes_no(message: str, default: bool = True) -> bool:
     if not answer:
         return default
     return answer.startswith("y")
+
+
+Option = tuple[str, Sequence[str]]
+
+_INDENT = " " * 6  # the wizard's body indent, matched by the menu's "?" marker
+
+
+def _menu_capable() -> bool:
+    """True when prompt_toolkit can render a menu on this terminal."""
+    return is_interactive() and os.environ.get("TERM", "") not in ("", "dumb")
+
+
+def _menu(message: str, options: Sequence[Option], checked: Sequence[int] = (),
+          locked: Sequence[int] = (), pointed: int = 0, multi: bool = False):
+    """Show a questionary menu; returns its raw answer (``None`` if aborted)."""
+    # Imported lazily: only the wizard needs it, so plain runs never pay for it.
+    import questionary
+
+    choices = [
+        questionary.Choice(
+            title=label, value=i, description=" ".join(details) or None,
+            checked=i in checked, disabled="always on" if i in locked else None,
+        )
+        for i, (label, details) in enumerate(options)
+    ]
+    kind = questionary.checkbox if multi else questionary.select
+    extra = {} if multi else {"default": choices[pointed]}
+    return kind(
+        message, choices=choices, qmark=_INDENT[:-1] + "?", pointer=">",
+        instruction=("(up/down to move, Space to toggle, Enter to confirm)" if multi
+                     else "(up/down to move, Enter to confirm)"),
+        **extra,
+    ).ask()
+
+
+def _numbered(options: Sequence[Option]) -> None:
+    """Print the option list used by the non-interactive fallback."""
+    for i, (label, details) in enumerate(options, start=1):
+        print(f"{_INDENT} {i}) {label}")
+        for detail in details:
+            print(f"{_INDENT}      {detail}")
+
+
+def _select_one(message: str, options: Sequence[Option], default: int = 0) -> int:
+    """Radio menu. Returns the chosen index, or ``default`` if aborted."""
+    default = max(0, min(default, len(options) - 1))
+    if not _menu_capable():
+        _numbered(options)
+        numbers = "/".join(str(i) for i in range(1, len(options) + 1))
+        answer = _prompt(f"{_INDENT}{message} {numbers} [{default + 1}]: ")
+        valid = answer.isdigit() and 1 <= int(answer) <= len(options)
+        return int(answer) - 1 if valid else default
+    picked = _menu(message, options, pointed=default)
+    return default if picked is None else picked
+
+
+def _select_many(message: str, options: Sequence[Option],
+                 preselected: Sequence[int] = (), locked: Sequence[int] = ()) -> list[int]:
+    """Checkbox menu. Returns the ticked indices in **top-to-bottom order**.
+
+    ``locked`` entries are ticked and disabled, so questionary's cursor skips
+    them and Space can never turn them off -- that is how a mandatory fallback
+    option is expressed. They are re-added to the result unconditionally, which
+    also covers questionary's "invert selection" shortcut. Callers rely on the
+    returned order, so the display order of ``options`` *is* the priority order.
+    """
+    locked_set = {i for i in locked if 0 <= i < len(options)}
+    checked = {i for i in preselected if 0 <= i < len(options)} | locked_set
+    if not _menu_capable():
+        _numbered(options)
+        shown = ",".join(str(i + 1) for i in sorted(checked))
+        answer = _prompt(f"{_INDENT}{message} (comma-separated, e.g. 1,3) [{shown}]: ")
+        picked = {
+            int(p) - 1 for p in answer.replace(" ", ",").split(",")
+            if p.strip().isdigit() and 1 <= int(p) <= len(options)
+        }
+        return sorted(picked | locked_set) if picked else sorted(checked)
+    answer = _menu(message, options, checked=sorted(checked), locked=sorted(locked_set),
+                   multi=True)
+    return sorted(checked if answer is None else set(answer) | locked_set)
+
+
+def _confirm(message: str, default: bool = True) -> bool:
+    """Yes/no as a two-entry radio menu, so it matches the other prompts."""
+    return _select_one(message, [("Yes", []), ("No", [])], default=0 if default else 1) == 0
 
 
 def gee_ready(project: Optional[str] = None) -> bool:
@@ -324,13 +439,22 @@ def _setup_feds() -> None:
         print(f"      OK  Found a local FEDS archive in {FEDS_DIR} "
               f"(fire list: {'yes' if firelist else 'no'}, {n_gpkg} GeoPackage(s)).")
         return
-    print("      Choose how to get the data:")
-    print(f"       - Manual        : unzip {FEDS_MTBS_ZIP_NAME} into {FEDS_DIR}/")
-    print("       - Full download : zip (~370 MB) into datasets/  (saves bandwidth")
-    print("                         on repeated runs; all fires resolve offline)")
-    print("       - On-the-fly    : each requested fire is range-pulled from")
-    print("                         Zenodo into cache/ as needed (saves disk)")
-    if _yes_no("      Download the full FEDS-MTBS archive (zip) now?", default=False):
+    options: list[Option] = [
+        ("On-the-fly     (recommended, saves disk)", [
+            "each requested fire is range-pulled from Zenodo into",
+            f"{FEDS_CACHE_DIR}/ as needed; nothing staged now",
+        ]),
+        ("Full download  (~370 MB zip into datasets/)", [
+            "saves bandwidth on repeated runs; all fires resolve",
+            "offline afterwards",
+        ]),
+        ("Manual         (I will unzip it myself)", [
+            f"unzip {FEDS_MTBS_ZIP_NAME} into {FEDS_DIR}/ yourself;",
+            "the wizard downloads nothing",
+        ]),
+    ]
+    choice = _select_one("How should the perimeter data be obtained?", options)
+    if choice == 1:
         # Imported lazily to avoid a config -> remote_archive import at load.
         from firedataforge.remote_archive import download_full_feds_archive
         try:
@@ -340,13 +464,16 @@ def _setup_feds() -> None:
         except Exception as exc:  # pragma: no cover - network dependent
             print(f"      !  Could not download the full archive ({exc}); "
                   "falling back to on-the-fly fetching.")
+    elif choice == 2:
+        print(f"      --  Manual: unzip {FEDS_MTBS_ZIP_NAME} into {FEDS_DIR}/ "
+              "when convenient; until then fires stream on demand.")
     else:
         print(f"      --  On-the-fly: fires stream into {FEDS_CACHE_DIR}/ as needed.")
-    # On-the-fly chosen (or full download failed): offer the tiny example bundle
-    # so the demos/benchmark/validation can run without any large download.
+    # Nothing staged locally (or the full download failed): offer the tiny example
+    # bundle so the demos/benchmark/validation can run without any large download.
     from firedataforge.examples import examples_record_configured, fetch_examples
-    if examples_record_configured() and _yes_no(
-            "      Also download the 8 example fires now (~22 MB, lets the demos run)?"):
+    if examples_record_configured() and _confirm(
+            "Also download the 8 example fires now (~22 MB, lets the demos run)?"):
         try:
             fetch_examples()
             print(f"      OK  Example fires downloaded to {FEDS_DIR}.")
@@ -366,11 +493,17 @@ def _setup_globalwui() -> None:
             for _, _, fs in os.walk(DEFAULT_GLOBALWUI_DIR) for f in fs):
         print(f"      OK  Found a local Global WUI archive in {DEFAULT_GLOBALWUI_DIR}.")
         return
-    print("      Choose how to get the data:")
-    print("       - Full download : ~3.8 GB North America archive into datasets/")
-    print("       - On-the-fly    : only the ~32 KB tiles each fire needs are")
-    print("                         streamed into cache/ (recommended)")
-    if _yes_no("      Download the full Global WUI archive now?", default=False):
+    options: list[Option] = [
+        ("On-the-fly     (recommended, saves disk)", [
+            "only the ~32 KB tiles each fire needs are streamed",
+            "into cache/GlobalWUI/",
+        ]),
+        ("Full download  (~3.8 GB into datasets/)", [
+            "the whole North America archive; every fire resolves",
+            "offline afterwards",
+        ]),
+    ]
+    if _select_one("How should the WUI raster be obtained?", options) == 1:
         try:
             download_globalwui_archive()
             print(f"      OK  Full Global WUI archive unpacked into {DEFAULT_GLOBALWUI_DIR}.")
@@ -382,39 +515,48 @@ def _setup_globalwui() -> None:
 
 
 def _setup_fire_metadata(path: str) -> None:
-    """Let the user choose where the fire NAME + acreage come from.
+    """Let the user choose which sources supply the fire NAME + acreage, and in
+    what order.
 
     The GeoPackage of step [3/5] already supplies each fire's geometry, active-fire
     window, and bounds; only the human-readable name + acreage are missing, and the
-    three sources trade off accuracy, recency, and reliability differently. The
-    pipeline always prefers, in order, whatever is present: FEDS-MTBS fire list >
-    MTBS fire list > live mtbs.gov > the Event ID. This step just stages the source
-    the user prefers.
+    three sources trade off accuracy, recency, and reliability differently. This is
+    a multi-select: every ticked source is staged, and the *display order of the
+    ticked boxes* becomes the runtime lookup order, persisted as
+    ``FIREDATAFORGE_METADATA_PRIORITY`` and honoured by :func:`get_fire_info`.
+    On-the-fly mtbs.gov is locked on as the last-resort fallback (it stages
+    nothing), so the chain can never end up empty.
     """
     print("\n[5/5] Fire name & acreage  (event metadata only -- geometry/window/")
     print("      bounds already come from the FEDS GeoPackage)")
     feds_fl = find_feds_firelist()
     mtbs_fl = os.path.exists(DEFAULT_FIRELIST_CACHE)
-    if feds_fl or mtbs_fl:
-        have = []
-        if feds_fl:
-            have.append(f"FEDS-MTBS fire list ({os.path.basename(feds_fl)})")
-        if mtbs_fl:
-            have.append(f"MTBS fire list ({DEFAULT_FIRELIST_CACHE})")
-        print(f"      OK  Already available: {', '.join(have)}.")
-        return
-    print("      Pick a source (all are optional; the gpkg still drives the data):")
-    print(f"       1) FEDS-MTBS fire list  -- {FEDS_MTBS_FIRELIST_NAME} from Zenodo")
-    print("                                  (~280 MB). Acreage aligned to FEDS;")
-    print("                                  2012-2024 only; offline & most reliable.")
-    print("       2) MTBS fire list        -- built from mtbs.gov (~30k fires, ~30s).")
-    print("                                  More recent coverage; acreage NOT FEDS-")
-    print("                                  aligned; offline once built.")
-    print("       3) On-the-fly (mtbs.gov) -- nothing staged; resolved live per fire.")
-    print("                                  Most up-to-date, but per-event network")
-    print("                                  and least reliable.")
-    choice = _prompt("      Choose 1/2/3 [3]: ", default="3").strip()
-    if choice == "1":
+    print("      The gpkg still drives geometry whichever sources you pick.")
+    options: list[Option] = [
+        ("FEDS-MTBS fire list" + ("   [already staged]" if feds_fl else ""), [
+            f"{FEDS_MTBS_FIRELIST_NAME} from Zenodo (~280 MB).",
+            "Acreage aligned to FEDS; 2012-2024 only; offline",
+            "and most reliable.",
+        ]),
+        ("MTBS fire list" + ("        [already staged]" if mtbs_fl else ""), [
+            "built from mtbs.gov (~30k fires, ~30 s). Covers the",
+            "years FEDS-MTBS does not (pre-2012 / post-2024), where",
+            "only perimeter/fireline layers are lost and the grid",
+            "falls back to the MTBS bbox; acreage NOT FEDS-aligned.",
+        ]),
+        ("On-the-fly (mtbs.gov)  [always on]", [
+            "nothing staged; resolved live per fire. Most up-to-date,",
+            "but needs network per event and is the least reliable --",
+            "kept as the mandatory fallback.",
+        ]),
+    ]
+    preselected = [i for i, present in ((0, feds_fl), (1, mtbs_fl)) if present]
+    chosen = _select_many(
+        "Tick every source to use; top-to-bottom order is the lookup priority",
+        options, preselected=preselected, locked=[2])
+
+    keys = {0: "feds", 1: "mtbs", 2: "live"}
+    if 0 in chosen and not feds_fl:
         from firedataforge.remote_archive import download_feds_firelist
         try:
             dest = download_feds_firelist(FEDS_DIR)
@@ -422,10 +564,10 @@ def _setup_fire_metadata(path: str) -> None:
                 print(f"      OK  FEDS-MTBS fire list saved to {dest}")
             else:
                 print("      !  Could not download the FEDS-MTBS fire list; "
-                      "names will fall back to mtbs.gov / the Event ID.")
+                      "names will fall back to the next source in the chain.")
         except Exception as exc:  # pragma: no cover - network dependent
             print(f"      !  Could not download the FEDS-MTBS fire list ({exc}); skipping.")
-    elif choice == "2":
+    if 1 in chosen and not mtbs_fl:
         # Imported lazily to avoid a config -> events import cycle at module load.
         from firedataforge.events import build_firelist
         try:
@@ -433,10 +575,12 @@ def _setup_fire_metadata(path: str) -> None:
             print(f"      OK  Saved offline MTBS fire list to {DEFAULT_FIRELIST_CACHE}")
         except Exception as exc:  # pragma: no cover - network dependent
             print(f"      !  Could not build the MTBS fire list ({exc}); skipping.")
-    else:
-        print("      --  On-the-fly: names/acreage resolved live from mtbs.gov, "
-              "falling back to the Event ID. Stage a list later with "
-              "`python main.py --build-firelist`.")
+
+    order = [keys[i] for i in chosen]
+    set_env_var(METADATA_PRIORITY_VAR, ",".join(order), path)
+    print(f"      OK  Lookup order: {' > '.join(order)} > Event ID.")
+    if order == ["live"]:
+        print("      (Stage a list later with `python main.py --build-firelist`.)")
 
 
 def run_setup_wizard(path: str = ENV_PATH) -> None:
