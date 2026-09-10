@@ -203,10 +203,12 @@ def process_single_fire(
 
     # --- Phase 1: FEDS perimeter (local; feeds masking + fireline_max_frp) ---
     perimeter: Optional[DataLayer] = None
+    perimeter_axis: Optional[list[datetime]] = None
     if has_feds and (selected("burn_perimeter") or selected("fireline_max_frp")
                      or selected("frp_daytime") or selected("frp_nighttime")):
         try:
             perimeter = process_feds25mtbs(task_info, cache_dir=args.cache_dir)
+            perimeter_axis = list(perimeter.timestamps or [])
             if args.interpolation > 0:
                 perimeter = interpolate_burn_perimeter(
                     perimeter, multiplier=args.interpolation)
@@ -227,7 +229,8 @@ def process_single_fire(
                            cache_dir=args.cache_dir)
 
     builders: dict[str, Callable[[], Any]] = {
-        "fireline": lambda: process_fireline(task_info, cache_dir=args.cache_dir),
+        "fireline": lambda: process_fireline(task_info, cache_dir=args.cache_dir,
+                                             timestamps=perimeter_axis),
         "frp_daytime": lambda: frp_builder("day"),
         "frp_nighttime": lambda: frp_builder("night"),
         "elevation": lambda: download_usgs(task_info),
@@ -297,7 +300,8 @@ def process_single_fire(
             fireline = next(iter(built.get("fireline") or []), None)
             try:
                 if fireline is None:
-                    fireline = process_fireline(task_info, cache_dir=args.cache_dir)
+                    fireline = process_fireline(task_info, cache_dir=args.cache_dir,
+                                                timestamps=perimeter_axis)
                 # Per-pixel max raw FRP (true MW), not the mass-preserving splat, so
                 # the per-segment max stays an observed radiative intensity.
                 frp_points = process_fireline_frp_points(

@@ -4,9 +4,10 @@ and perimeter interpolation."""
 import glob
 import logging
 import os
+from bisect import bisect_left
 from dataclasses import replace
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
 import geopandas as gpd
 import numpy as np
@@ -311,6 +312,99 @@ def get_perimeter_hull_wkt(
     return hull.wkt
 
 
+def perimeter_frames(
+    gpkg_path: str,
+    t_start: datetime,
+    t_end: datetime,
+) -> tuple[list[datetime], list[MultiPolygon]]:
+    """The ``burn_perimeter`` time axis: in-window frames whose geometry changed.
+
+    Single source of truth for that axis. :func:`process_feds25mtbs` rasterizes
+    exactly these frames and :func:`process_fireline` resamples onto these
+    timestamps, so the two layers cannot drift apart. They used to run separate
+    filters over the same GeoPackage -- an area-threshold comparison here, an
+    exact-coordinate one for the fireline -- which left the layers on different
+    axes for about a third of the archive's fires, usually off by one frame at
+    ignition (the first perimeter has no fireline: nothing has advanced yet).
+
+    Args:
+        gpkg_path: FEDS25MTBS GeoPackage for one fire.
+        t_start: Start of the event window; frames before it are dropped.
+        t_end: End of the event window; frames after it are dropped.
+
+    Returns:
+        ``(timestamps, geometries)``, in ascending time order and the same
+        length. Geometries are ``MultiPolygon`` in EPSG:4326.
+    """
+    gdf = gpd.read_file(gpkg_path, layer='perimeter')
+    gdf = gdf.sort_values('t').reset_index(drop=True)
+
+    timestamps: list[datetime] = []
+    geometries: list[MultiPolygon] = []
+    last_imported_geom = None
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None:
+            continue
+
+        if geom.geom_type == 'MultiPolygon':
+            pass
+        elif geom.geom_type == 'Polygon':
+            geom = MultiPolygon([geom])
+        else:
+            log.warning(f"Unexpected geometry type: {geom.geom_type}")
+            continue
+
+        timestamp = pd.to_datetime(row['t']).to_pydatetime()
+        if not (t_start <= timestamp <= t_end):
+            continue
+
+        # Keep only frames that differ from the last one kept; the threshold
+        # comparison filters floating-point noise.
+        if last_imported_geom is None or not geometries_are_equal(
+                geom, last_imported_geom):
+            timestamps.append(timestamp)
+            geometries.append(geom)
+            last_imported_geom = geom  # only update when actually imported
+
+    return timestamps, geometries
+
+
+def perimeter_timestamps(
+    task_info: ProcessingTask,
+    cache_dir: str = CACHE_DIR,
+) -> list[datetime]:
+    """The ``burn_perimeter`` axis for a task, without rasterizing anything.
+
+    Lets a caller that does not build the perimeter layer (e.g. a fireline-only
+    run) still put its output on the perimeter's clock.
+    """
+    gpkg_path = find_event_gpkg(task_info.event_id, task_info.year, cache_dir=cache_dir)
+    assert gpkg_path is not None and os.path.exists(gpkg_path), (
+        f"Error: FEDS25MTBS GeoPackage for {task_info.event_id} not found "
+        f"under {FEDS_DIR}/ or {FEDS_CACHE_DIR}/"
+    )
+    return perimeter_frames(gpkg_path, task_info.t_start, task_info.t_end)[0]
+
+
+def _rasterize(geometries, task_info: ProcessingTask) -> np.ndarray:
+    """Burn ``geometries`` (already in the task CRS) onto the task grid."""
+    t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
+    transform = from_origin(t_minx, t_maxy, task_info.resolution, task_info.resolution)
+    raster = features.rasterize(
+        shapes=[(geom, 1) for geom in geometries],
+        out_shape=task_info.shape,
+        transform=transform,
+        fill=0,
+        dtype=np.uint8,
+        all_touched=True,
+    )
+    assert raster.shape == task_info.shape, (
+        "Rasterized shape does not match target shape"
+    )
+    return raster.astype(np.bool_)
+
+
 def process_feds25mtbs(
     task_info: ProcessingTask,
     cache_dir: str = CACHE_DIR,
@@ -320,7 +414,7 @@ def process_feds25mtbs(
     Reads the GeoPackage file for the fire event and rasterizes each timestep's
     perimeter polygon to match the task grid specification. Only includes frames
     within the task_info time range (t_start to t_end) where the perimeter
-    actually changed from the previous frame.
+    actually changed from the previous frame (see :func:`perimeter_frames`).
 
     Args:
         task_info: Task configuration with event details and grid parameters.
@@ -342,97 +436,21 @@ def process_feds25mtbs(
         f"under {FEDS_DIR}/ or {FEDS_CACHE_DIR}/"
     )
 
-    gdf = gpd.read_file(gpkg_path, layer='perimeter')
-
-    # Sort by timestamp to ensure correct consecutive comparisons
-    gdf = gdf.sort_values('t').reset_index(drop=True)
-
-    all_data = []
-    all_timestamps = []
-
-    for _, row in gdf.iterrows():
-        timestamp = pd.to_datetime(row['t'])
-        timestamp = timestamp.to_pydatetime()
-        geom = row.geometry
-
-        if geom is None:
-            continue
-
-        if geom.geom_type == 'MultiPolygon':
-            all_data.append(geom)
-        elif geom.geom_type == 'Polygon':
-            all_data.append(MultiPolygon([geom]))
-        else:
-            log.warning(
-                f"Unexpected geometry type: {geom.geom_type} for event_id: {task_info.event_id}")
-            continue
-
-        all_timestamps.append(timestamp)
-
-    # Filter to only include frames within t_start and t_end
-    filtered_data = []
-    filtered_timestamps = []
-    for ts, geom in zip(all_timestamps, all_data):
-        if task_info.t_start <= ts <= task_info.t_end:
-            filtered_timestamps.append(ts)
-            filtered_data.append(geom)
-
+    timestamps, geometries = perimeter_frames(
+        gpkg_path, task_info.t_start, task_info.t_end)
     log.info(
-        f"Filtered frames: {len(filtered_data)} of {len(all_data)} "
+        f"Unique frames imported: {len(timestamps)} "
         f"(t_start={task_info.t_start}, t_end={task_info.t_end})"
     )
-
-    # Filter to only include frames where perimeter is different from last imported
-    # Uses threshold-based comparison to filter floating-point noise
-    data_list = []
-    timestamps = []
-    last_imported_geom = None
-    for ts, geom in zip(filtered_timestamps, filtered_data):
-        if last_imported_geom is None or not geometries_are_equal(geom, last_imported_geom):
-            data_list.append(geom)
-            timestamps.append(ts)
-            last_imported_geom = geom  # Only update when we actually import
-
-    log.info(f"Unique frames imported: {len(data_list)} of {len(filtered_data)}")
-
-    # Calculate grid dimensions from task bounds
-    t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
-
-    res = task_info.resolution
-    transform = from_origin(t_minx, t_maxy, res, res)
-
-    log.info(f"Target Grid: {task_info.shape} pixels @ {res}m resolution")
-
-    # Prepare GeoDataFrame with geometries
-    gdf = gpd.GeoDataFrame({
-        'geometry': data_list,
-        'timestamp': timestamps
-    }, crs="EPSG:4326")
+    log.info(f"Target Grid: {task_info.shape} pixels @ {task_info.resolution}m resolution")
 
     log.info(
         f"Reprojecting geometries from EPSG:4326 to target CRS {task_info.crs}"
     )
+    gdf = gpd.GeoDataFrame({'geometry': geometries}, crs="EPSG:4326")
     gdf = gdf.to_crs(task_info.crs)
 
-    # Rasterize each timestep
-    processed_rasters = []
-    for _, row in gdf.iterrows():
-        # Burn value of 1 where polygon exists, 0 elsewhere
-        shapes = [(row.geometry, 1)]
-
-        raster = features.rasterize(
-            shapes=shapes,
-            out_shape=task_info.shape,
-            transform=transform,
-            fill=0,
-            dtype=np.uint8,
-            all_touched=True
-        )
-        assert raster.shape == task_info.shape, (
-            "Rasterized shape does not match target shape"
-        )
-        raster = raster.astype(np.bool_)
-        processed_rasters.append(raster)
+    processed_rasters = [_rasterize([geom], task_info) for geom in gdf.geometry]
 
     return DataLayer(
         name="burn_perimeter",
@@ -447,24 +465,41 @@ def process_fireline(
     task_info: ProcessingTask,
     width: float = 375.0,
     cache_dir: str = CACHE_DIR,
+    timestamps: Optional[Sequence[datetime]] = None,
 ) -> DataLayer:
     """Process FEDS25MTBS fireline data into rasterized time series.
 
-    Reads the fireline layer from the GeoPackage file for the fire event,
-    buffers each line geometry by half the specified width (to create a
-    corridor of the given total width), and rasterizes each timestep to
-    match the task grid specification.  Only includes frames within the
-    task_info time range where the fireline actually changed from the
-    previous frame.
+    The fireline is not an independent cadence: FEDS derives it from the same
+    12-hourly snapshots as the perimeter, and each line marks the perimeter
+    segments that advanced since the previous snapshot. This layer therefore
+    rides the ``burn_perimeter`` axis rather than one of its own -- frame ``k``
+    holds every fireline observed in ``(timestamps[k-1], timestamps[k]]``,
+    buffered by half of ``width`` into a corridor and rasterized onto the task
+    grid. Frame 0 also takes anything observed at or before ``timestamps[0]``.
+    A frame with no observation in its interval is an empty mask, which is what
+    the fireline layer means: nothing advanced.
+
+    Sharing the axis is what keeps the two layers paired. Filtering the fireline
+    on its own (the previous behaviour) dropped different frames than the
+    perimeter filter did, so for about a third of the archive's fires the two
+    ``.npz`` files came out on different clocks -- typically off by one frame,
+    because a fire's first perimeter has no fireline at all.
 
     Args:
         task_info: Task configuration with event details and grid parameters.
         width: Total width of the fireline corridor in meters.
         cache_dir: Cache root for an on-demand GeoPackage fetch (under its fixed
             ``FEDS25MTBS`` subfolder) when the fire is not present locally.
+        timestamps: Axis to emit on. Defaults to the ``burn_perimeter`` axis read
+            from the same GeoPackage. Pass the *observed* perimeter timestamps,
+            not an SDF-interpolated axis: a synthetic in-between perimeter has no
+            observed fireline, and emitting empty masks there would assert a
+            quiet front that was never observed. On a subset axis the layer stays
+            correct for the "most recent frame <= t" cursor every consumer uses.
 
     Returns:
-        DataLayer containing boolean rasters for each timestep.
+        DataLayer containing boolean rasters, one per timestamp on the axis.
+        Empty (no frames) when the fire has no fireline in the window at all.
 
     Raises:
         AssertionError: If the GeoPackage file doesn't exist.
@@ -478,99 +513,81 @@ def process_fireline(
         f"under {FEDS_DIR}/ or {FEDS_CACHE_DIR}/"
     )
 
-    gdf = gpd.read_file(gpkg_path, layer='fireline')
+    axis = (list(timestamps) if timestamps is not None
+            else perimeter_frames(gpkg_path, task_info.t_start, task_info.t_end)[0])
+    assert all(a <= b for a, b in zip(axis, axis[1:])), (
+        "fireline axis must be sorted ascending (bucketing uses bisect)")
 
-    # Sort by timestamp
+    gdf = gpd.read_file(gpkg_path, layer='fireline')
     gdf = gdf.sort_values('t').reset_index(drop=True)
 
-    all_data = []
-    all_timestamps = []
-
+    obs_timestamps: list[datetime] = []
+    obs_geometries = []
     for _, row in gdf.iterrows():
-        timestamp = pd.to_datetime(row['t']).to_pydatetime()
         geom = row.geometry
-
-        if geom is None:
+        if geom is None or geom.is_empty:
             continue
-
-        all_data.append(geom)
-        all_timestamps.append(timestamp)
-
-    # Filter to only include frames within t_start and t_end
-    filtered_data = []
-    filtered_timestamps = []
-    for ts, geom in zip(all_timestamps, all_data):
-        if task_info.t_start <= ts <= task_info.t_end:
-            filtered_timestamps.append(ts)
-            filtered_data.append(geom)
+        timestamp = pd.to_datetime(row['t']).to_pydatetime()
+        if task_info.t_start <= timestamp <= task_info.t_end:
+            obs_timestamps.append(timestamp)
+            obs_geometries.append(geom)
 
     log.info(
-        f"Filtered fireline frames: {len(filtered_data)} of {len(all_data)} "
-        f"(t_start={task_info.t_start}, t_end={task_info.t_end})"
+        f"Fireline observations in window: {len(obs_timestamps)} of {len(gdf)} "
+        f"(t_start={task_info.t_start}, t_end={task_info.t_end}); "
+        f"burn_perimeter axis: {len(axis)} frames"
     )
 
-    # Filter to only include frames where fireline geometry changed.
-    # Cannot use geometries_are_equal (area-based) because lines have zero area;
-    # use .equals() for exact coordinate comparison instead.
-    data_list = []
-    timestamps = []
-    last_imported_geom = None
-    for ts, geom in zip(filtered_timestamps, filtered_data):
-        if last_imported_geom is None or not last_imported_geom.equals(geom):
-            data_list.append(geom)
-            timestamps.append(ts)
-            last_imported_geom = geom
+    if not axis or not obs_geometries:
+        return DataLayer(
+            name="fireline", data=[], timestamps=[],
+            source=_FEDS_SOURCE, native_resolution=375,
+            note={"width_m": width, "axis": "burn_perimeter"},
+        )
 
-    log.info(f"Unique fireline frames imported: {len(data_list)} of {len(filtered_data)}")
-
-    # Calculate grid dimensions from task bounds
-    t_minx, t_miny, t_maxx, t_maxy = task_info.bounds
-    res = task_info.resolution
-    transform = from_origin(t_minx, t_maxy, res, res)
-
-    log.info(f"Target Grid: {task_info.shape} pixels @ {res}m resolution")
-
-    # Prepare GeoDataFrame with geometries
-    gdf_lines = gpd.GeoDataFrame(
-        {'geometry': data_list, 'timestamp': timestamps},
-        crs="EPSG:4326",
-    )
-
+    log.info(f"Target Grid: {task_info.shape} pixels @ {task_info.resolution}m resolution")
     log.info(
         f"Reprojecting fireline geometries from EPSG:4326 to target CRS {task_info.crs}"
     )
+    gdf_lines = gpd.GeoDataFrame({'geometry': obs_geometries}, crs="EPSG:4326")
     gdf_lines = gdf_lines.to_crs(task_info.crs)
 
     # Buffer line geometries by half the width to create corridors
-    half_width = width / 2.0
-    gdf_lines['geometry'] = gdf_lines.geometry.buffer(half_width)
+    corridors = gdf_lines.geometry.buffer(width / 2.0).tolist()
 
-    # Rasterize each timestep
-    processed_rasters = []
-    for _, row in gdf_lines.iterrows():
-        shapes = [(row.geometry, 1)]
+    # Bucket each observation into the axis frame that closes its interval:
+    # frame k covers (axis[k-1], axis[k]], and frame 0 also takes anything at or
+    # before axis[0]. bisect_left gives that index directly.
+    buckets: list[list] = [[] for _ in axis]
+    n_after_axis = 0
+    for timestamp, corridor in zip(obs_timestamps, corridors):
+        index = bisect_left(axis, timestamp)
+        if index >= len(axis):
+            n_after_axis += 1  # observed after the last perimeter frame
+            continue
+        buckets[index].append(corridor)
 
-        raster = features.rasterize(
-            shapes=shapes,
-            out_shape=task_info.shape,
-            transform=transform,
-            fill=0,
-            dtype=np.uint8,
-            all_touched=True,
-        )
-        assert raster.shape == task_info.shape, (
-            "Rasterized shape does not match target shape"
-        )
-        raster = raster.astype(np.bool_)
-        processed_rasters.append(raster)
+    if n_after_axis:
+        log.info(f"Dropped {n_after_axis} fireline observation(s) past the last "
+                 f"burn_perimeter frame ({axis[-1]})")
+
+    processed_rasters = [
+        _rasterize(shapes, task_info) if shapes
+        else np.zeros(task_info.shape, dtype=np.bool_)
+        for shapes in buckets
+    ]
+    n_empty = sum(1 for shapes in buckets if not shapes)
+    log.info(f"Fireline frames on the burn_perimeter axis: {len(processed_rasters)} "
+             f"({n_empty} with no observed fireline)")
 
     return DataLayer(
         name="fireline",
         data=processed_rasters,
-        timestamps=timestamps,
+        timestamps=list(axis),
         source=_FEDS_SOURCE,
         native_resolution=375,
-        note={"width_m": width},
+        note={"width_m": width, "axis": "burn_perimeter",
+              "n_observations": len(obs_geometries), "n_empty_frames": n_empty},
     )
 
 
